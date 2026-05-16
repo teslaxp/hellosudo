@@ -33,19 +33,32 @@
     Registry GUID of the PasswordProvider credential provider.
     Must include surrounding braces, e.g. {60b78e88-ead8-445c-9cfd-0b87f74ea6cd}.
 
+.PARAMETER IgnoreHelloCheck
+    Bypass the Windows Hello / PIN pre-flight safety check.
+    WARNING: Only use this if you are absolutely sure biometric or PIN
+    authentication is available on your system. Skipping this check on a
+    machine without Windows Hello configured will leave ConsentUI with no
+    available credential provider, effectively locking out all UAC elevations.
+
 .EXAMPLE
     .\install.ps1
-    Interactive install using all defaults.
+    Interactive install using all defaults (Hello check enforced).
 
 .EXAMPLE
     .\install.ps1 -Silent -Tasks Lock,Unlock,Logon -GPScripts Shutdown
 
 .EXAMPLE
     .\install.ps1 -Tasks Logon,Unlock -GPScripts @() -Silent
+
+.EXAMPLE
+    .\install.ps1 -Silent -IgnoreHelloCheck
+    Silent install bypassing the Windows Hello pre-flight check.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Silent,
+
+    [switch]$IgnoreHelloCheck,
 
     [ValidateSet('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')]
     [string[]]$Tasks = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup'),
@@ -164,6 +177,7 @@ Write-Log "Tasks param   : $($Tasks -join ', ')"
 Write-Log "GPScripts     : $($GPScripts -join ', ')"
 Write-Log "ProviderGUID  : $PasswordProviderGUID"
 Write-Log "Silent        : $Silent"
+Write-Log "IgnoreHello   : $IgnoreHelloCheck"
 #endregion
 
 #region ── OS Edition Guard ─────────────────────────────────────────────────────
@@ -175,6 +189,79 @@ $isHomeEdition = $osCaption -match '\bHome\b'
 if ($isHomeEdition -and $GPScripts.Count -gt 0) {
     Write-LogHost "WARNING: OS appears to be a Home edition ('$osCaption'). Local GPO is not supported. GPO script configuration will be skipped." -Level WARN -Color Yellow
     $GPScripts = @()
+}
+#endregion
+
+#region ── Windows Hello / NGC Pre-flight Check ──────────────────────────────────
+function Test-NgcPinConfigured {
+    <#
+    .SYNOPSIS
+        Returns $true if at least one NGC (PIN/Windows Hello) credential entry
+        exists on this machine, indicating that biometric/PIN auth is available.
+    .NOTES
+        The NGC credentials key contains one subkey per enrolled credential.
+        An empty key (no children) means Windows Hello / PIN is not set up.
+    #>
+    $ngcKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin\Credentials'
+    if (-not (Test-Path $ngcKey)) { return $false }
+    $children = Get-ChildItem -Path $ngcKey -ErrorAction SilentlyContinue
+    return ($null -ne $children -and $children.Count -gt 0)
+}
+
+Write-LogHost 'Running Windows Hello / NGC pre-flight check...' -Color Cyan
+$helloConfigured = Test-NgcPinConfigured
+Write-Log "NGC/Hello credentials detected: $helloConfigured"
+
+if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
+    if ($Silent) {
+        # Hard terminating error — cannot prompt in silent mode
+        $errMsg = @(
+            'SAFETY ABORT: No Windows Hello PIN or Biometric credential was detected on this system.'
+            'Disabling the PasswordProvider without an alternative credential provider will leave'
+            'ConsentUI with no available sign-in option, effectively locking out all UAC elevations.'
+            ''
+            'Resolution options:'
+            '  1. Configure a Windows Hello PIN or Biometrics (Settings > Accounts > Sign-in options)'
+            '     then re-run the installer.'
+            '  2. If you are certain a credential provider IS available and want to bypass this guard,'
+            '     re-run with: .\install.ps1 -Silent -IgnoreHelloCheck'
+        ) -join [Environment]::NewLine
+        Write-Log $errMsg -Level ERROR
+        throw $errMsg
+    } else {
+        # Interactive warning — require explicit "PROCEED" confirmation
+        Write-Host ''
+        Write-Host ('!' * 62) -ForegroundColor Red
+        Write-Host '!!                  *** SAFETY WARNING ***                  !!' -ForegroundColor Red
+        Write-Host ('!' * 62) -ForegroundColor Red
+        Write-Host '' 
+        Write-Host '  No Windows Hello PIN or Biometric credential was detected.' -ForegroundColor Red
+        Write-Host '' 
+        Write-Host '  uacbio works by DISABLING the PasswordProvider credential' -ForegroundColor Yellow
+        Write-Host '  provider. If no alternative provider (PIN, fingerprint, face)' -ForegroundColor Yellow
+        Write-Host '  is configured, ConsentUI will have ZERO available options.' -ForegroundColor Yellow
+        Write-Host '  This will make it IMPOSSIBLE to approve UAC prompts.' -ForegroundColor Yellow
+        Write-Host '' 
+        Write-Host '  Recommended action:' -ForegroundColor Cyan
+        Write-Host '    Settings > Accounts > Sign-in options > Windows Hello PIN' -ForegroundColor Cyan
+        Write-Host '    Set up a PIN first, then re-run this installer.' -ForegroundColor Cyan
+        Write-Host '' 
+        Write-Host ('!' * 62) -ForegroundColor Red
+        Write-Host ''
+
+        $confirmation = Read-Host 'Type PROCEED to bypass this safety check, or press Enter to abort'
+        if ($confirmation.Trim() -ne 'PROCEED') {
+            Write-LogHost 'Installation aborted by user at safety check.' -Color Yellow
+            exit 0
+        }
+        Write-Log 'User explicitly typed PROCEED to bypass Hello pre-flight check.'
+        Write-LogHost 'Safety check bypassed by user confirmation.' -Level WARN -Color Yellow
+    }
+} elseif (-not $helloConfigured -and $IgnoreHelloCheck) {
+    Write-LogHost 'WARNING: No NGC/Hello credentials detected, but -IgnoreHelloCheck was specified. Proceeding.' -Level WARN -Color Yellow
+    Write-Log 'Hello check bypassed via -IgnoreHelloCheck flag.'
+} else {
+    Write-LogHost '  Windows Hello / PIN credential confirmed — safe to proceed.' -Color Green
 }
 #endregion
 

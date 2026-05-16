@@ -10,10 +10,11 @@
 1. [Description](#description)
 2. [The Problem](#the-problem)
 3. [The Solution — State Matrix](#the-solution--state-matrix)
-4. [Installation](#installation)
-5. [Uninstallation](#uninstallation)
-6. [Logging](#logging)
-7. [Known Limitations](#known-limitations)
+4. [Safety Mechanisms](#safety-mechanisms)
+5. [Installation](#installation)
+6. [Uninstallation](#uninstallation)
+7. [Logging](#logging)
+8. [Known Limitations](#known-limitations)
 
 ---
 
@@ -87,6 +88,42 @@ The two registered tasks are:
 |------------------------------|-----------------|---------------------------|
 | `uacbio_Disable_Password`    | `1` (disable)   | Logon, Workstation Unlock |
 | `uacbio_Restore_Password`    | `0` (restore)   | Startup, Lock, Logoff     |
+
+---
+
+## Safety Mechanisms
+
+### Windows Hello / NGC Pre-flight Check
+
+> **This check exists to prevent a catastrophic lockout.** If the `PasswordProvider` is disabled and no alternative credential provider is available, ConsentUI will have zero sign-in options — making it impossible to approve any UAC elevation prompt.
+
+Before making any system changes, uacbio verifies that at least one **Windows Hello PIN or Biometric** credential is enrolled on the machine by checking for subkeys under:
+
+```
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin\Credentials
+```
+
+If this key has no children, no PIN or biometric is configured.
+
+**Behaviour when no credential is detected:**
+
+| Mode | Behaviour |
+|---|---|
+| **Interactive** (default) | Displays a large red warning and requires the user to type `PROCEED` to continue. Any other input aborts the installation safely. |
+| **Silent** (`-Silent`) | Throws a hard terminating error with a clear explanation and exits. No system changes are made. |
+
+In both cases the log file records the outcome.
+
+**Bypassing the check (`-IgnoreHelloCheck`):**
+
+If you are deploying to a machine where a credential provider is available but not detectable via the NGC key (e.g., a third-party smart-card provider), you can bypass the guard:
+
+```powershell
+.\install.ps1 -IgnoreHelloCheck
+.\install.ps1 -Silent -IgnoreHelloCheck
+```
+
+> ⚠️ **Do not use `-IgnoreHelloCheck` unless you are absolutely certain an alternative credential provider will be available in ConsentUI.** You can verify this by opening an elevated prompt manually before running the installer.
 
 ---
 
@@ -179,6 +216,22 @@ Suppresses the interactive Review & Confirm menu and proceeds immediately with t
 
 ```powershell
 .\install.ps1 -Silent
+```
+
+---
+
+#### `-IgnoreHelloCheck`
+
+**Type:** `switch`  
+**Default:** not set (check enforced)
+
+Bypasses the Windows Hello / NGC pre-flight safety check. See [Safety Mechanisms](#safety-mechanisms) for full details.
+
+> ⚠️ **Only use this switch if you are certain an alternative credential provider (PIN, biometrics, smart card) will be available in ConsentUI.** Using it on a machine with no configured alternative will lock out all UAC elevations.
+
+```powershell
+# Silent deployment on a machine with a non-NGC credential provider
+.\install.ps1 -Silent -IgnoreHelloCheck
 ```
 
 ---
