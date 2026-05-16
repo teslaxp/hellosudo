@@ -65,12 +65,21 @@ function Invoke-SelfElevate {
     $scriptPath = $MyInvocation.PSCommandPath
     $pwsh       = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
-    $sudoAvail = $false
-    try {
-        $sudoAvail = [bool](Get-Command sudo -CommandType Application -ErrorAction SilentlyContinue)
-    } catch {}
+    # Prefer Windows 11 built-in sudo when available AND enabled in Settings.
+    # sudo.exe is present on Windows 11 24H2+ even when the feature is disabled,
+    # so we must verify the registry toggle before attempting to use it.
+    $sudoEnabled = $false
+    $sudoExe     = Get-Command sudo -CommandType Application -ErrorAction SilentlyContinue
+    if ($sudoExe) {
+        try {
+            $sudoReg     = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' `
+                               -Name 'Enabled' -ErrorAction SilentlyContinue
+            # Enabled: 0=disabled, 1=new-window, 2=input-disabled, 3=inline
+            $sudoEnabled = ($null -ne $sudoReg) -and ([int]$sudoReg.Enabled -ge 1)
+        } catch {}
+    }
 
-    if ($sudoAvail) {
+    if ($sudoEnabled) {
         Write-Host 'Elevating via sudo...' -ForegroundColor Cyan
         & sudo $pwsh -NoProfile -ExecutionPolicy Bypass -File "`"$scriptPath`""
     } else {
