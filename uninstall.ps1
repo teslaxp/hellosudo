@@ -103,15 +103,19 @@ if (-not (Test-Path $Script:MetaKey)) {
 
 $meta = Get-ItemProperty -Path $Script:MetaKey
 
-$targetGUID       = $meta.TargetGUID
-$originalDisabled = [int]$meta.OriginalDisabledState
-$installedTasks   = if ($meta.InstalledTasks)     { $meta.InstalledTasks   -split ',' | Where-Object { $_ } } else { @() }
-$installedGP      = if ($meta.InstalledGPScripts) { $meta.InstalledGPScripts -split ',' | Where-Object { $_ } } else { @() }
+$targetGUID              = $meta.TargetGUID
+$originalDisabled        = [int]$meta.OriginalDisabledState
+$installedTasks          = if ($meta.InstalledTasks)     { $meta.InstalledTasks   -split ',' | Where-Object { $_ } } else { @() }
+$installedGP             = if ($meta.InstalledGPScripts) { $meta.InstalledGPScripts -split ',' | Where-Object { $_ } } else { @() }
+$originalConsentBehavior = if ($null -ne $meta.OriginalConsentBehavior) { [int]$meta.OriginalConsentBehavior } else { 5 }
+$originalSecureDesktop   = if ($null -ne $meta.OriginalSecureDesktop)   { [int]$meta.OriginalSecureDesktop }   else { 1 }
 
-Write-Log "TargetGUID           : $targetGUID"
-Write-Log "OriginalDisabledState: $originalDisabled"
-Write-Log "InstalledTasks       : $($installedTasks -join ', ')"
-Write-Log "InstalledGPScripts   : $($installedGP -join ', ')"
+Write-Log "TargetGUID              : $targetGUID"
+Write-Log "OriginalDisabledState   : $originalDisabled"
+Write-Log "InstalledTasks          : $($installedTasks -join ', ')"
+Write-Log "InstalledGPScripts      : $($installedGP -join ', ')"
+Write-Log "OriginalConsentBehavior : $originalConsentBehavior"
+Write-Log "OriginalSecureDesktop   : $originalSecureDesktop"
 #endregion
 
 #region ── Remove Scheduled Tasks ────────────────────────────────────────────────
@@ -202,6 +206,24 @@ if ($gpupdateNeeded) {
     } catch {
         Write-Log "gpupdate failed: $_" -Level WARN
     }
+}
+#endregion
+
+#region ── Revert UAC Secure Desktop Policy ──────────────────────────────────────
+$uacPolicyKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+Write-LogHost 'Reverting UAC Secure Desktop policy to original values...' -Color Cyan
+
+try {
+    Set-ItemProperty -Path $uacPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value $originalConsentBehavior -Type DWord
+    Write-Log "Restored ConsentPromptBehaviorAdmin = $originalConsentBehavior."
+
+    Set-ItemProperty -Path $uacPolicyKey -Name 'PromptOnSecureDesktop' -Value $originalSecureDesktop -Type DWord
+    Write-Log "Restored PromptOnSecureDesktop = $originalSecureDesktop."
+
+    Write-LogHost "  UAC policy reverted successfully." -Color Green
+} catch {
+    Write-Log "Failed to revert UAC policy values: $_" -Level WARN
+    Write-LogHost "  WARNING: Could not revert UAC policy. Restore manually — ConsentPromptBehaviorAdmin=$originalConsentBehavior, PromptOnSecureDesktop=$originalSecureDesktop" -Level WARN -Color Yellow
 }
 #endregion
 

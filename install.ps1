@@ -8,6 +8,13 @@
     provider GUID so that ConsentUI surfaces biometrics immediately instead of
     hiding them behind "More choices".
 
+    As a mandatory core step, the installer also configures the Administrator UAC
+    prompt policy to require explicit credential (or biometric) authentication on
+    the Secure Desktop by setting:
+      - ConsentPromptBehaviorAdmin = 1  (prompt for credentials, not just consent)
+      - PromptOnSecureDesktop       = 1  (always use the isolated Secure Desktop)
+    Original values are preserved in metadata and fully restored on uninstall.
+
     Automation is achieved through Windows Task Scheduler triggers (Logon, Logoff,
     Lock, Unlock, Startup) and optional Group Policy startup/shutdown scripts.
 
@@ -58,6 +65,7 @@ $Script:LogDir      = 'C:\ProgramData\uacbio\logs'
 $Script:LogFile     = Join-Path $Script:LogDir 'install.log'
 $Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
 $Script:CPKey       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+$Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $Script:TaskDisable = 'uacbio_Disable_Password'
 $Script:TaskRestore = 'uacbio_Restore_Password'
 $Script:RegExe      = "$env:SystemRoot\System32\reg.exe"
@@ -171,6 +179,8 @@ if (-not $Silent) {
     Write-Host "║  Provider GUID : $PasswordProviderGUID" -ForegroundColor White
     Write-Host "║  Tasks         : $($Tasks -join ', ')" -ForegroundColor White
     Write-Host "║  GPO Scripts   : $(if ($GPScripts.Count) { $GPScripts -join ', ' } else { '(none)' })" -ForegroundColor White
+    Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,           ║' -ForegroundColor White
+    Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ║' -ForegroundColor White
     Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
     Write-Host '║  [C] Continue with these settings                        ║' -ForegroundColor Green
     Write-Host '║  [T] Change Tasks selection                               ║' -ForegroundColor Yellow
@@ -242,6 +252,24 @@ if (Test-Path $Script:CPKey) {
     Write-LogHost "The GUID may differ on this machine. Proceeding with OriginalDisabledState=0." -Level WARN -Color Yellow
     $originalDisabled = 0
 }
+
+# Read current UAC policy values before modifying them
+Write-LogHost 'Reading current UAC policy values...' -Color Cyan
+$uacPolicy = Get-ItemProperty -Path $Script:UACPolicyKey -ErrorAction SilentlyContinue
+$originalConsentBehavior = if ($null -ne $uacPolicy -and $null -ne $uacPolicy.ConsentPromptBehaviorAdmin) {
+    [int]$uacPolicy.ConsentPromptBehaviorAdmin
+} else {
+    # Windows default: 5 (prompt for consent on secure desktop)
+    5
+}
+$originalSecureDesktop = if ($null -ne $uacPolicy -and $null -ne $uacPolicy.PromptOnSecureDesktop) {
+    [int]$uacPolicy.PromptOnSecureDesktop
+} else {
+    # Windows default: 1 (secure desktop enabled)
+    1
+}
+Write-Log "Current ConsentPromptBehaviorAdmin : $originalConsentBehavior"
+Write-Log "Current PromptOnSecureDesktop      : $originalSecureDesktop"
 #endregion
 
 #region ── Write Metadata ────────────────────────────────────────────────────────
@@ -250,12 +278,28 @@ Write-LogHost 'Writing installation metadata to HKLM:\SOFTWARE\uacbio ...' -Colo
 if (-not (Test-Path $Script:MetaKey)) {
     New-Item -Path $Script:MetaKey -Force | Out-Null
 }
-Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'            -Value $PasswordProviderGUID -Type String
-Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledState' -Value $originalDisabled      -Type DWord
-Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTasks'        -Value ($Tasks -join ',')     -Type String
-Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGPScripts'    -Value ($GPScripts -join ',') -Type String
+Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'              -Value $PasswordProviderGUID    -Type String
+Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledState'   -Value $originalDisabled         -Type DWord
+Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTasks'          -Value ($Tasks -join ',')        -Type String
+Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGPScripts'      -Value ($GPScripts -join ',')    -Type String
+Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalConsentBehavior' -Value $originalConsentBehavior  -Type DWord
+Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalSecureDesktop'   -Value $originalSecureDesktop    -Type DWord
 
-Write-Log "Metadata written: TargetGUID=$PasswordProviderGUID, OriginalDisabledState=$originalDisabled, InstalledTasks=$($Tasks -join ','), InstalledGPScripts=$($GPScripts -join ',')"
+Write-Log "Metadata written: TargetGUID=$PasswordProviderGUID, OriginalDisabledState=$originalDisabled, InstalledTasks=$($Tasks -join ','), InstalledGPScripts=$($GPScripts -join ','), OriginalConsentBehavior=$originalConsentBehavior, OriginalSecureDesktop=$originalSecureDesktop"
+#endregion
+
+#region ── UAC Secure Desktop Policy ────────────────────────────────────────────
+Write-LogHost 'Configuring UAC Secure Desktop credential policy (core)...' -Color Cyan
+
+# ConsentPromptBehaviorAdmin = 1 : Prompt for credentials (enables biometric auth in ConsentUI)
+# PromptOnSecureDesktop       = 1 : Always run the prompt on the isolated Secure Desktop
+Set-ItemProperty -Path $Script:UACPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value 1 -Type DWord
+Write-Log 'Set ConsentPromptBehaviorAdmin = 1 (credential prompt, triggers biometric flow).'
+
+Set-ItemProperty -Path $Script:UACPolicyKey -Name 'PromptOnSecureDesktop' -Value 1 -Type DWord
+Write-Log 'Set PromptOnSecureDesktop = 1 (Secure Desktop enforced).'
+
+Write-LogHost '  UAC policy applied: credential prompt on Secure Desktop enabled.' -Color Green
 #endregion
 
 #region ── Helper: Registry action string ───────────────────────────────────────

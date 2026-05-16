@@ -21,7 +21,13 @@
 
 **uacbio** is a lightweight Windows automation project that fixes a chronic usability issue with UAC (User Account Control) prompts on Windows 11 machines using **local accounts**.
 
-It works by writing a single `DWORD` registry value (`Disabled`) under the `PasswordProvider` credential provider GUID at precisely the right moments using Windows Task Scheduler triggers and optional Group Policy scripts. No third-party software, no drivers, no kernel patches.
+It works in two complementary layers:
+
+1. **UAC Policy (core, mandatory):** On installation, uacbio sets `ConsentPromptBehaviorAdmin = 1` and `PromptOnSecureDesktop = 1` in the Windows policy registry. This forces the Administrator UAC prompt to request an explicit credential — password *or* biometric — on the isolated Secure Desktop, rather than silently auto-elevating or showing a plain consent dialog. Original values are preserved in metadata and fully restored on uninstall.
+
+2. **PasswordProvider toggling:** uacbio dynamically writes a single `Disabled` DWORD under the `PasswordProvider` credential provider GUID at precisely the right moments using Windows Task Scheduler triggers and optional Group Policy scripts. When the provider is disabled, ConsentUI falls through to the next available provider — Windows Hello biometrics — so fingerprint or face recognition appears immediately at the UAC prompt.
+
+Both layers operate exclusively through native Windows registry keys and built-in scheduling mechanisms. No third-party software, no drivers, no kernel patches — and **no dependency on Group Policy infrastructure**, making the solution work flawlessly on both Windows Home and Pro editions.
 
 ---
 
@@ -46,10 +52,24 @@ The challenge is that this registry value must be managed dynamically: disabled 
 
 ## The Solution — State Matrix
 
+uacbio operates in two complementary layers that together guarantee biometrics appear immediately at every UAC prompt.
+
+### Layer 1 — UAC Policy (applied once at install, works on Home & Pro)
+
+| Registry Value | Key | Set To | Effect |
+|---|---|---|---|
+| `ConsentPromptBehaviorAdmin` | `...\Policies\System` | `1` | Forces credential/biometric prompt for Admins (instead of silent consent) |
+| `PromptOnSecureDesktop` | `...\Policies\System` | `1` | Ensures the prompt runs on the isolated Secure Desktop |
+
+These two values are the prerequisite that makes biometrics available at the UAC prompt. They target native system registry keys directly, bypassing Group Policy infrastructure entirely, so they work identically on **Windows Home** and **Windows Pro**.
+
+### Layer 2 — PasswordProvider Dynamic Toggling (via Task Scheduler + optional GPO)
+
 uacbio registers Scheduled Tasks and optional Group Policy scripts to toggle the `Disabled` value at each system state transition:
 
 | System Event          | Action                    | Mechanism             |
 |-----------------------|---------------------------|-----------------------|
+| **Install**           | Set `ConsentPromptBehaviorAdmin=1`, `PromptOnSecureDesktop=1` | Registry (core) |
 | **Logon**             | Set `Disabled = 1`        | Task Scheduler        |
 | **Workstation Unlock**| Set `Disabled = 1`        | Task Scheduler        |
 | **Workstation Lock**  | Set `Disabled = 0`        | Task Scheduler        |
@@ -57,6 +77,7 @@ uacbio registers Scheduled Tasks and optional Group Policy scripts to toggle the
 | **Startup**           | Set `Disabled = 0`        | Task Scheduler        |
 | **Shutdown** (GPO)    | Set `Disabled = 0`        | Group Policy Script   |
 | **Startup** (GPO)     | Set `Disabled = 0`        | Group Policy Script   |
+| **Uninstall**         | Restore `ConsentPromptBehaviorAdmin` + `PromptOnSecureDesktop` to originals | Registry |
 
 > Both scheduled tasks run under the **SYSTEM** account with **HighestAvailable** privileges, ensuring they execute regardless of which user is active.
 
@@ -189,6 +210,7 @@ The displayed values always reflect the *current* parameter values — whether t
 
 | Component | Location |
 |---|---|
+| UAC policy (core) | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` |
 | Scheduled Task (disable) | `\uacbio_Disable_Password` in Task Scheduler |
 | Scheduled Task (restore) | `\uacbio_Restore_Password` in Task Scheduler |
 | GPO Shutdown script | `C:\Windows\System32\GroupPolicy\Machine\Scripts\Scripts\shutdown.ini` |
@@ -209,9 +231,10 @@ The uninstaller:
 1. Reads metadata from `HKLM\SOFTWARE\uacbio`
 2. Removes both scheduled tasks (`uacbio_Disable_Password`, `uacbio_Restore_Password`)
 3. Removes uacbio blocks from `shutdown.ini` and `startup.ini` (if present), then runs `gpupdate /force`
-4. Reverts the `PasswordProvider` `Disabled` value to its **original state** (as captured during install)
-5. Deletes the `HKLM\SOFTWARE\uacbio` metadata key
-6. Removes `C:\ProgramData\uacbio` if it is empty
+4. **Reverts `ConsentPromptBehaviorAdmin` and `PromptOnSecureDesktop`** to their original pre-install values (stored in metadata)
+5. Reverts the `PasswordProvider` `Disabled` value to its **original state** (as captured during install)
+6. Deletes the `HKLM\SOFTWARE\uacbio` metadata key
+7. Removes `C:\ProgramData\uacbio` if it is empty
 
 > If the metadata key is missing (e.g., uacbio was never installed), the uninstaller logs an error and exits without making any changes.
 
