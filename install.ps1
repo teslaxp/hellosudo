@@ -79,6 +79,7 @@ $Script:LogFile     = Join-Path $Script:LogDir 'install.log'
 $Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
 $Script:CPKey       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
 $Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+$Script:TaskPath    = '\uacbio\'
 $Script:TaskDisable = 'uacbio_Disable_Password'
 $Script:TaskRestore = 'uacbio_Restore_Password'
 $Script:RegExe      = "$env:SystemRoot\System32\reg.exe"
@@ -452,15 +453,15 @@ if ($disableTriggers.Count -gt 0) {
     $taskDef  = New-ScheduledTask -Action $action -Principal $principal -Trigger $disableTriggers -Settings $settings `
                     -Description 'uacbio: Disables PasswordProvider so biometrics appear first in UAC.'
 
-    if (Get-ScheduledTask -TaskName $Script:TaskDisable -ErrorAction SilentlyContinue) {
+    if (Get-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
         Write-Log "Task '$($Script:TaskDisable)' already exists — replacing."
-        if ($PSCmdlet.ShouldProcess($Script:TaskDisable, 'Unregister existing scheduled task')) {
-            Unregister-ScheduledTask -TaskName $Script:TaskDisable -Confirm:$false
+        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskDisable)", 'Unregister existing scheduled task')) {
+            Unregister-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -Confirm:$false
         }
     }
-    if ($PSCmdlet.ShouldProcess($Script:TaskDisable, 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $Script:TaskDisable -InputObject $taskDef | Out-Null
-        Write-LogHost "Registered task: $($Script:TaskDisable)" -Color Green
+    if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskDisable)", 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -InputObject $taskDef | Out-Null
+        Write-LogHost "Registered task: $($Script:TaskPath)$($Script:TaskDisable)" -Color Green
     }
 } else {
     Write-Log "No triggers selected for '$($Script:TaskDisable)' — skipping registration."
@@ -504,15 +505,15 @@ if ($restoreTriggers.Count -gt 0) {
     $taskDef  = New-ScheduledTask -Action $action -Principal $principal -Trigger $restoreTriggers -Settings $settings `
                     -Description 'uacbio: Restores PasswordProvider so the standard UAC flow is preserved outside elevated sessions.'
 
-    if (Get-ScheduledTask -TaskName $Script:TaskRestore -ErrorAction SilentlyContinue) {
+    if (Get-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
         Write-Log "Task '$($Script:TaskRestore)' already exists — replacing."
-        if ($PSCmdlet.ShouldProcess($Script:TaskRestore, 'Unregister existing scheduled task')) {
-            Unregister-ScheduledTask -TaskName $Script:TaskRestore -Confirm:$false
+        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskRestore)", 'Unregister existing scheduled task')) {
+            Unregister-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -Confirm:$false
         }
     }
-    if ($PSCmdlet.ShouldProcess($Script:TaskRestore, 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $Script:TaskRestore -InputObject $taskDef | Out-Null
-        Write-LogHost "Registered task: $($Script:TaskRestore)" -Color Green
+    if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskRestore)", 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -InputObject $taskDef | Out-Null
+        Write-LogHost "Registered task: $($Script:TaskPath)$($Script:TaskRestore)" -Color Green
     }
 } else {
     Write-Log "No triggers selected for '$($Script:TaskRestore)' — skipping registration."

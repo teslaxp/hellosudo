@@ -21,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 $Script:LogDir      = 'C:\ProgramData\uacbio\logs'
 $Script:LogFile     = Join-Path $Script:LogDir 'uninstall.log'
 $Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
+$Script:TaskPath    = '\uacbio\'
 $Script:TaskDisable = 'uacbio_Disable_Password'
 $Script:TaskRestore = 'uacbio_Restore_Password'
 $Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
@@ -140,13 +141,43 @@ Write-Log "OriginalSecureDesktop   : $originalSecureDesktop"
 Write-LogHost 'Removing scheduled tasks...' -Color Cyan
 
 foreach ($taskName in @($Script:TaskDisable, $Script:TaskRestore)) {
-    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-        if ($PSCmdlet.ShouldProcess($taskName, 'Unregister scheduled task')) {
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-            Write-LogHost "  Removed task: $taskName" -Color Green
+    if (Get-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
+        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$taskName", 'Unregister scheduled task')) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -Confirm:$false
+            Write-LogHost "  Removed task: $($Script:TaskPath)$taskName" -Color Green
         }
     } else {
-        Write-Log "  Task not found (already removed?): $taskName" -Level WARN
+        Write-Log "  Task not found (already removed?): $($Script:TaskPath)$taskName" -Level WARN
+    }
+}
+
+# Remove the \uacbio\ Task Scheduler folder if it is now empty.
+# Unregister-ScheduledTask does not delete folders, so we use the
+# Schedule.Service COM object which exposes folder management APIs.
+if ($PSCmdlet.ShouldProcess($Script:TaskPath, 'Delete empty Task Scheduler folder')) {
+    try {
+        $schedService = New-Object -ComObject 'Schedule.Service'
+        $schedService.Connect()
+        $rootFolder   = $schedService.GetFolder('\')
+        $uacbioFolder = $null
+        try { $uacbioFolder = $schedService.GetFolder($Script:TaskPath) } catch {}
+
+        if ($null -ne $uacbioFolder) {
+            $remainingTasks = $uacbioFolder.GetTasks(0)   # 0 = exclude hidden
+            if ($remainingTasks.Count -eq 0) {
+                $rootFolder.DeleteFolder('uacbio', 0)
+                Write-LogHost "  Task Scheduler folder '$($Script:TaskPath)' deleted." -Color Green
+                Write-Log "Task Scheduler folder '$($Script:TaskPath)' deleted."
+            } else {
+                Write-LogHost "  Task Scheduler folder '$($Script:TaskPath)' still contains $($remainingTasks.Count) task(s) — left in place." -Level WARN -Color Yellow
+                Write-Log "Folder '$($Script:TaskPath)' not deleted — $($remainingTasks.Count) task(s) remain." -Level WARN
+            }
+        } else {
+            Write-Log "Task Scheduler folder '$($Script:TaskPath)' not found — nothing to delete."
+        }
+    } catch {
+        Write-Log "Could not delete Task Scheduler folder '$($Script:TaskPath)': $_" -Level WARN
+        Write-LogHost "  WARNING: Could not remove Task Scheduler folder '$($Script:TaskPath)'. Remove it manually if desired." -Level WARN -Color Yellow
     }
 }
 #endregion
