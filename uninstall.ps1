@@ -36,10 +36,11 @@ function Write-Log {
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line  = "[$stamp] [$Level] $Message"
 
+    # Log writes are observational infrastructure — always execute even under -WhatIf.
     if (-not (Test-Path $Script:LogDir)) {
-        New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $Script:LogDir -Force -WhatIf:$false | Out-Null
     }
-    Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8
+    Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8 -WhatIf:$false
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -113,14 +114,22 @@ if (-not (Test-Path $Script:MetaKey)) {
 $meta = Get-ItemProperty -Path $Script:MetaKey
 
 $targetGUID              = $meta.TargetGUID
-$originalDisabled        = [int]$meta.OriginalDisabledState
+$originalDisabledState   = if ($null -ne $meta.OriginalDisabledState)   { [int]$meta.OriginalDisabledState }   else { 0 }
+# OriginalDisabledExisted: 1=value was present, 0=value was absent (written by install.ps1 >= v2).
+# Fall back to ($originalDisabledState -ne 0) for backward compatibility with older metadata.
+$originalDisabledExisted = if ($meta.PSObject.Properties['OriginalDisabledExisted']) {
+    [bool]([int]$meta.OriginalDisabledExisted)
+} else {
+    $originalDisabledState -ne 0
+}
 $installedTasks          = if ($meta.InstalledTasks)     { $meta.InstalledTasks   -split ',' | Where-Object { $_ } } else { @() }
 $installedGP             = if ($meta.InstalledGPScripts) { $meta.InstalledGPScripts -split ',' | Where-Object { $_ } } else { @() }
-$originalConsentBehavior = if ($null -ne $meta.OriginalConsentBehavior) { [int]$meta.OriginalConsentBehavior } else { 5 }
-$originalSecureDesktop   = if ($null -ne $meta.OriginalSecureDesktop)   { [int]$meta.OriginalSecureDesktop }   else { 1 }
+$originalConsentBehavior = if ($meta.PSObject.Properties['OriginalConsentBehavior']) { [int]$meta.OriginalConsentBehavior } else { 5 }
+$originalSecureDesktop   = if ($meta.PSObject.Properties['OriginalSecureDesktop'])   { [int]$meta.OriginalSecureDesktop }   else { 1 }
 
 Write-Log "TargetGUID              : $targetGUID"
-Write-Log "OriginalDisabledState   : $originalDisabled"
+Write-Log "OriginalDisabledExisted : $originalDisabledExisted"
+Write-Log "OriginalDisabledState   : $originalDisabledState"
 Write-Log "InstalledTasks          : $($installedTasks -join ', ')"
 Write-Log "InstalledGPScripts      : $($installedGP -join ', ')"
 Write-Log "OriginalConsentBehavior : $originalConsentBehavior"
@@ -132,8 +141,10 @@ Write-LogHost 'Removing scheduled tasks...' -Color Cyan
 
 foreach ($taskName in @($Script:TaskDisable, $Script:TaskRestore)) {
     if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-        Write-LogHost "  Removed task: $taskName" -Color Green
+        if ($PSCmdlet.ShouldProcess($taskName, 'Unregister scheduled task')) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-LogHost "  Removed task: $taskName" -Color Green
+        }
     } else {
         Write-Log "  Task not found (already removed?): $taskName" -Level WARN
     }
@@ -148,6 +159,7 @@ function Remove-UacbioGpoBlock {
         Identifies the block using the '# uacbio' marker line and removes the
         two preceding lines (CmdLine and Parameters entries) plus the marker itself.
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)][string]$IniPath)
 
     if (-not (Test-Path $IniPath)) {
@@ -160,9 +172,7 @@ function Remove-UacbioGpoBlock {
     $markerIndices = @()
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match [regex]::Escape($marker)) {
-            $markerIndices += $i
-        }
+        if ($lines[$i] -eq $marker) { $markerIndices += $i }
     }
 
     if ($markerIndices.Count -eq 0) {
@@ -170,7 +180,7 @@ function Remove-UacbioGpoBlock {
         return
     }
 
-    # Remove from bottom up to keep indices stable
+    # Remove from bottom up to keep earlier indices stable
     $result = [System.Collections.Generic.List[string]]($lines)
     foreach ($idx in ($markerIndices | Sort-Object -Descending)) {
         # Remove marker line
@@ -186,8 +196,10 @@ function Remove-UacbioGpoBlock {
         }
     }
 
-    Set-Content -Path $IniPath -Value $result.ToArray() -Encoding Unicode
-    Write-Log "Cleaned uacbio block from '$IniPath'."
+    if ($PSCmdlet.ShouldProcess($IniPath, 'Remove uacbio GPO script block')) {
+        Set-Content -Path $IniPath -Value $result.ToArray() -Encoding Unicode
+        Write-Log "Cleaned uacbio block from '$IniPath'."
+    }
 }
 
 $gpupdateNeeded = $false
@@ -208,12 +220,14 @@ if ($installedGP -contains 'Startup') {
 
 if ($gpupdateNeeded) {
     Write-LogHost 'Running gpupdate /force ...' -Color Cyan
-    try {
-        $gp = & gpupdate /force 2>&1
-        Write-Log "gpupdate output: $($gp -join ' ')"
-        Write-LogHost 'Group Policy updated.' -Color Green
-    } catch {
-        Write-Log "gpupdate failed: $_" -Level WARN
+    if ($PSCmdlet.ShouldProcess('Group Policy', 'Run gpupdate /force')) {
+        try {
+            $gp = & gpupdate /force 2>&1
+            Write-Log "gpupdate output: $($gp -join ' ')"
+            Write-LogHost 'Group Policy updated.' -Color Green
+        } catch {
+            Write-Log "gpupdate failed: $_" -Level WARN
+        }
     }
 }
 #endregion
@@ -222,39 +236,55 @@ if ($gpupdateNeeded) {
 $uacPolicyKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 Write-LogHost 'Reverting UAC Secure Desktop policy to original values...' -Color Cyan
 
-try {
-    Set-ItemProperty -Path $uacPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value $originalConsentBehavior -Type DWord
-    Write-Log "Restored ConsentPromptBehaviorAdmin = $originalConsentBehavior."
-
-    Set-ItemProperty -Path $uacPolicyKey -Name 'PromptOnSecureDesktop' -Value $originalSecureDesktop -Type DWord
-    Write-Log "Restored PromptOnSecureDesktop = $originalSecureDesktop."
-
-    Write-LogHost "  UAC policy reverted successfully." -Color Green
-} catch {
-    Write-Log "Failed to revert UAC policy values: $_" -Level WARN
-    Write-LogHost "  WARNING: Could not revert UAC policy. Restore manually — ConsentPromptBehaviorAdmin=$originalConsentBehavior, PromptOnSecureDesktop=$originalSecureDesktop" -Level WARN -Color Yellow
+if ($PSCmdlet.ShouldProcess($uacPolicyKey, "Restore ConsentPromptBehaviorAdmin = $originalConsentBehavior")) {
+    try {
+        Set-ItemProperty -Path $uacPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value $originalConsentBehavior -Type DWord
+        Write-Log "Restored ConsentPromptBehaviorAdmin = $originalConsentBehavior."
+    } catch {
+        Write-Log "Failed to restore ConsentPromptBehaviorAdmin: $_" -Level WARN
+        Write-LogHost "  WARNING: Could not restore ConsentPromptBehaviorAdmin. Set manually to $originalConsentBehavior." -Level WARN -Color Yellow
+    }
 }
+
+if ($PSCmdlet.ShouldProcess($uacPolicyKey, "Restore PromptOnSecureDesktop = $originalSecureDesktop")) {
+    try {
+        Set-ItemProperty -Path $uacPolicyKey -Name 'PromptOnSecureDesktop' -Value $originalSecureDesktop -Type DWord
+        Write-Log "Restored PromptOnSecureDesktop = $originalSecureDesktop."
+    } catch {
+        Write-Log "Failed to restore PromptOnSecureDesktop: $_" -Level WARN
+        Write-LogHost "  WARNING: Could not restore PromptOnSecureDesktop. Set manually to $originalSecureDesktop." -Level WARN -Color Yellow
+    }
+}
+
+Write-LogHost "  UAC policy reverted successfully." -Color Green
 #endregion
 
 #region ── Revert Registry 'Disabled' Value ─────────────────────────────────────
-Write-LogHost "Reverting credential provider 'Disabled' value to $originalDisabled ..." -Color Cyan
+Write-LogHost "Reverting credential provider 'Disabled' value..." -Color Cyan
 
 $cpKeyPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$targetGUID"
 
 if (Test-Path $cpKeyPath) {
-    if ($originalDisabled -eq 0) {
-        # Remove the value entirely if it didn't exist originally (0 = not set / enabled)
-        try {
-            Remove-ItemProperty -Path $cpKeyPath -Name 'Disabled' -ErrorAction SilentlyContinue
-            Write-Log "Removed 'Disabled' value (restoring to default enabled state)."
-        } catch {
-            Write-Log "Could not remove 'Disabled' value: $_" -Level WARN
+    if ($originalDisabledExisted) {
+        # Value was explicitly present before install — restore it to its original DWORD
+        if ($PSCmdlet.ShouldProcess($cpKeyPath, "Restore Disabled = $originalDisabledState")) {
+            Set-ItemProperty -Path $cpKeyPath -Name 'Disabled' -Value $originalDisabledState -Type DWord
+            Write-Log "Restored 'Disabled' to $originalDisabledState."
+            Write-LogHost "  Registry reverted: Disabled = $originalDisabledState" -Color Green
         }
     } else {
-        Set-ItemProperty -Path $cpKeyPath -Name 'Disabled' -Value $originalDisabled -Type DWord
-        Write-Log "Set 'Disabled' to $originalDisabled."
+        # Value was absent before install — remove it entirely rather than writing 0
+        if ($PSCmdlet.ShouldProcess($cpKeyPath, 'Remove Disabled value (was absent before install)')) {
+            try {
+                Remove-ItemProperty -Path $cpKeyPath -Name 'Disabled' -ErrorAction SilentlyContinue
+                Write-Log "Removed 'Disabled' value (restoring to original absent state)."
+                Write-LogHost "  Registry reverted: Disabled value removed (was originally absent)." -Color Green
+            } catch {
+                Write-Log "Could not remove 'Disabled' value: $_" -Level WARN
+                Write-LogHost "  WARNING: Could not remove 'Disabled' value. Remove manually from: $cpKeyPath" -Level WARN -Color Yellow
+            }
+        }
     }
-    Write-LogHost "  Registry reverted successfully." -Color Green
 } else {
     Write-LogHost "Credential provider key not found at '$cpKeyPath' — skipping revert." -Level WARN -Color Yellow
 }
@@ -263,32 +293,34 @@ if (Test-Path $cpKeyPath) {
 #region ── Remove Metadata Registry Key ──────────────────────────────────────────
 Write-LogHost "Removing HKLM:\SOFTWARE\uacbio metadata key ..." -Color Cyan
 
-try {
-    Remove-Item -Path $Script:MetaKey -Recurse -Force
-    Write-Log "Metadata key removed."
-    Write-LogHost "  Metadata key removed." -Color Green
-} catch {
-    Write-Log "Failed to remove metadata key: $_" -Level WARN
-    Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $($Script:MetaKey)" -Level WARN -Color Yellow
+if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Remove metadata registry key')) {
+    try {
+        Remove-Item -Path $Script:MetaKey -Recurse -Force
+        Write-Log "Metadata key removed."
+        Write-LogHost "  Metadata key removed." -Color Green
+    } catch {
+        Write-Log "Failed to remove metadata key: $_" -Level WARN
+        Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $($Script:MetaKey)" -Level WARN -Color Yellow
+    }
 }
 #endregion
 
 #region ── Remove Data Directory (if empty) ──────────────────────────────────────
 Write-LogHost "Checking if C:\ProgramData\uacbio can be removed ..." -Color Cyan
 
-# The log directory contains our own log — flush it first, then check
 Write-Log "Uninstallation complete. Checking data directory for cleanup."
 
 $remaining = Get-ChildItem -Path $Script:DataDir -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -ne $Script:LogFile }
 
 if ($null -eq $remaining -or $remaining.Count -eq 0) {
-    try {
-        # Small files only remain (our own log); remove everything
-        Remove-Item -Path $Script:DataDir -Recurse -Force
-        Write-Host "  Data directory removed: $($Script:DataDir)" -ForegroundColor Green
-    } catch {
-        Write-Host "  WARNING: Could not fully remove data directory. Remove manually: $($Script:DataDir)" -ForegroundColor Yellow
+    if ($PSCmdlet.ShouldProcess($Script:DataDir, 'Remove data directory')) {
+        try {
+            Remove-Item -Path $Script:DataDir -Recurse -Force
+            Write-Host "  Data directory removed: $($Script:DataDir)" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARNING: Could not fully remove data directory. Remove manually: $($Script:DataDir)" -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host "  Data directory not empty — left in place: $($Script:DataDir)" -ForegroundColor Yellow

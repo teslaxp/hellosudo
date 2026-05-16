@@ -81,11 +81,11 @@ function Write-Log {
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line  = "[$stamp] [$Level] $Message"
 
-    # Ensure log directory exists (may not yet exist on first run)
+    # Log writes are observational infrastructure — always execute even under -WhatIf.
     if (-not (Test-Path $Script:LogDir)) {
-        New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $Script:LogDir -Force -WhatIf:$false | Out-Null
     }
-    Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8
+    Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8 -WhatIf:$false
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -240,37 +240,40 @@ if (-not $Silent) {
 #region ── Backup Current Registry State ────────────────────────────────────────
 Write-LogHost 'Reading current PasswordProvider Disabled value...' -Color Cyan
 
-$originalDisabled = $null
+# Track both existence and value independently so uninstall can make the right choice:
+#   $originalDisabledExisted = $false → value was absent  → uninstall removes it
+#   $originalDisabledExisted = $true  → value was present → uninstall restores it
+$originalDisabledExisted = $false
+$originalDisabledState   = 0
+
 if (Test-Path $Script:CPKey) {
     try {
-        $currentVal = Get-ItemProperty -Path $Script:CPKey -Name 'Disabled' -ErrorAction SilentlyContinue
-        if ($null -ne $currentVal) {
-            $originalDisabled = [int]$currentVal.Disabled
-            Write-Log "Current 'Disabled' value: $originalDisabled"
+        $cpProps = Get-ItemProperty -Path $Script:CPKey -ErrorAction SilentlyContinue
+        if ($null -ne $cpProps -and $cpProps.PSObject.Properties['Disabled']) {
+            $originalDisabledExisted = $true
+            $originalDisabledState   = [int]$cpProps.Disabled
+            Write-Log "Current 'Disabled' value: $originalDisabledState (value present)"
         } else {
-            Write-Log "No 'Disabled' value found; will treat original as 0 (enabled)."
-            $originalDisabled = 0
+            Write-Log "'Disabled' value is absent — uninstall will remove it rather than set it to 0."
         }
     } catch {
         Write-Log "Could not read registry key '$($Script:CPKey)': $_" -Level WARN
-        $originalDisabled = 0
     }
 } else {
     Write-LogHost "Credential Provider registry key not found: $($Script:CPKey)" -Level WARN -Color Yellow
-    Write-LogHost "The GUID may differ on this machine. Proceeding with OriginalDisabledState=0." -Level WARN -Color Yellow
-    $originalDisabled = 0
+    Write-LogHost "The GUID may differ on this machine. Proceeding with no original value." -Level WARN -Color Yellow
 }
 
 # Read current UAC policy values before modifying them
 Write-LogHost 'Reading current UAC policy values...' -Color Cyan
 $uacPolicy = Get-ItemProperty -Path $Script:UACPolicyKey -ErrorAction SilentlyContinue
-$originalConsentBehavior = if ($null -ne $uacPolicy -and $null -ne $uacPolicy.ConsentPromptBehaviorAdmin) {
+$originalConsentBehavior = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['ConsentPromptBehaviorAdmin']) {
     [int]$uacPolicy.ConsentPromptBehaviorAdmin
 } else {
     # Windows default: 5 (prompt for consent on secure desktop)
     5
 }
-$originalSecureDesktop = if ($null -ne $uacPolicy -and $null -ne $uacPolicy.PromptOnSecureDesktop) {
+$originalSecureDesktop = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['PromptOnSecureDesktop']) {
     [int]$uacPolicy.PromptOnSecureDesktop
 } else {
     # Windows default: 1 (secure desktop enabled)
@@ -283,17 +286,20 @@ Write-Log "Current PromptOnSecureDesktop      : $originalSecureDesktop"
 #region ── Write Metadata ────────────────────────────────────────────────────────
 Write-LogHost 'Writing installation metadata to HKLM:\SOFTWARE\uacbio ...' -Color Cyan
 
-if (-not (Test-Path $Script:MetaKey)) {
-    New-Item -Path $Script:MetaKey -Force | Out-Null
-}
-Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'              -Value $PasswordProviderGUID    -Type String
-Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledState'   -Value $originalDisabled         -Type DWord
-Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTasks'          -Value ($Tasks -join ',')        -Type String
-Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGPScripts'      -Value ($GPScripts -join ',')    -Type String
-Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalConsentBehavior' -Value $originalConsentBehavior  -Type DWord
-Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalSecureDesktop'   -Value $originalSecureDesktop    -Type DWord
+if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Create/update metadata registry key')) {
+    if (-not (Test-Path $Script:MetaKey)) {
+        New-Item -Path $Script:MetaKey -Force | Out-Null
+    }
+    Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'              -Value $PasswordProviderGUID          -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledExisted' -Value ([int]$originalDisabledExisted) -Type DWord
+    Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledState'   -Value $originalDisabledState          -Type DWord
+    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTasks'          -Value ($Tasks -join ',')             -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGPScripts'      -Value ($GPScripts -join ',')         -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalConsentBehavior' -Value $originalConsentBehavior       -Type DWord
+    Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalSecureDesktop'   -Value $originalSecureDesktop         -Type DWord
 
-Write-Log "Metadata written: TargetGUID=$PasswordProviderGUID, OriginalDisabledState=$originalDisabled, InstalledTasks=$($Tasks -join ','), InstalledGPScripts=$($GPScripts -join ','), OriginalConsentBehavior=$originalConsentBehavior, OriginalSecureDesktop=$originalSecureDesktop"
+    Write-Log "Metadata written: TargetGUID=$PasswordProviderGUID, OriginalDisabledExisted=$([int]$originalDisabledExisted), OriginalDisabledState=$originalDisabledState, InstalledTasks=$($Tasks -join ','), InstalledGPScripts=$($GPScripts -join ','), OriginalConsentBehavior=$originalConsentBehavior, OriginalSecureDesktop=$originalSecureDesktop"
+}
 #endregion
 
 #region ── UAC Secure Desktop Policy ────────────────────────────────────────────
@@ -301,11 +307,15 @@ Write-LogHost 'Configuring UAC Secure Desktop credential policy (core)...' -Colo
 
 # ConsentPromptBehaviorAdmin = 1 : Prompt for credentials (enables biometric auth in ConsentUI)
 # PromptOnSecureDesktop       = 1 : Always run the prompt on the isolated Secure Desktop
-Set-ItemProperty -Path $Script:UACPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value 1 -Type DWord
-Write-Log 'Set ConsentPromptBehaviorAdmin = 1 (credential prompt, triggers biometric flow).'
+if ($PSCmdlet.ShouldProcess($Script:UACPolicyKey, 'Set ConsentPromptBehaviorAdmin = 1')) {
+    Set-ItemProperty -Path $Script:UACPolicyKey -Name 'ConsentPromptBehaviorAdmin' -Value 1 -Type DWord
+    Write-Log 'Set ConsentPromptBehaviorAdmin = 1 (credential prompt, triggers biometric flow).'
+}
 
-Set-ItemProperty -Path $Script:UACPolicyKey -Name 'PromptOnSecureDesktop' -Value 1 -Type DWord
-Write-Log 'Set PromptOnSecureDesktop = 1 (Secure Desktop enforced).'
+if ($PSCmdlet.ShouldProcess($Script:UACPolicyKey, 'Set PromptOnSecureDesktop = 1')) {
+    Set-ItemProperty -Path $Script:UACPolicyKey -Name 'PromptOnSecureDesktop' -Value 1 -Type DWord
+    Write-Log 'Set PromptOnSecureDesktop = 1 (Secure Desktop enforced).'
+}
 
 Write-LogHost '  UAC policy applied: credential prompt on Secure Desktop enabled.' -Color Green
 #endregion
@@ -342,13 +352,10 @@ if ('Logon' -in $Tasks) {
 }
 if ('Unlock' -in $Tasks) {
     Write-Log "Adding Workstation Unlock trigger to $($Script:TaskDisable)"
-    # Unlock is exposed via the SessionStateChange trigger type
-    $unlockTrigger = New-ScheduledTaskTrigger -AtLogOn   # placeholder CimInstance
-    $stateClass     = 'MSFT_TaskSessionStateChangeTrigger'
-    $unlockCim      = New-CimInstance -Namespace 'Root\Microsoft\Windows\TaskScheduler' `
-                        -ClassName $stateClass `
-                        -ClientOnly `
-                        -Property @{ StateChange = [uint32]8 }   # 8 = SessionUnlock
+    $unlockCim = New-CimInstance -Namespace 'Root\Microsoft\Windows\TaskScheduler' `
+                    -ClassName 'MSFT_TaskSessionStateChangeTrigger' `
+                    -ClientOnly `
+                    -Property @{ StateChange = [uint32]8 }   # 8 = SessionUnlock
     $disableTriggers.Add($unlockCim)
 }
 
@@ -360,10 +367,14 @@ if ($disableTriggers.Count -gt 0) {
 
     if (Get-ScheduledTask -TaskName $Script:TaskDisable -ErrorAction SilentlyContinue) {
         Write-Log "Task '$($Script:TaskDisable)' already exists — replacing."
-        Unregister-ScheduledTask -TaskName $Script:TaskDisable -Confirm:$false
+        if ($PSCmdlet.ShouldProcess($Script:TaskDisable, 'Unregister existing scheduled task')) {
+            Unregister-ScheduledTask -TaskName $Script:TaskDisable -Confirm:$false
+        }
     }
-    Register-ScheduledTask -TaskName $Script:TaskDisable -InputObject $taskDef | Out-Null
-    Write-LogHost "Registered task: $($Script:TaskDisable)" -Color Green
+    if ($PSCmdlet.ShouldProcess($Script:TaskDisable, 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $Script:TaskDisable -InputObject $taskDef | Out-Null
+        Write-LogHost "Registered task: $($Script:TaskDisable)" -Color Green
+    }
 } else {
     Write-Log "No triggers selected for '$($Script:TaskDisable)' — skipping registration."
 }
@@ -408,10 +419,14 @@ if ($restoreTriggers.Count -gt 0) {
 
     if (Get-ScheduledTask -TaskName $Script:TaskRestore -ErrorAction SilentlyContinue) {
         Write-Log "Task '$($Script:TaskRestore)' already exists — replacing."
-        Unregister-ScheduledTask -TaskName $Script:TaskRestore -Confirm:$false
+        if ($PSCmdlet.ShouldProcess($Script:TaskRestore, 'Unregister existing scheduled task')) {
+            Unregister-ScheduledTask -TaskName $Script:TaskRestore -Confirm:$false
+        }
     }
-    Register-ScheduledTask -TaskName $Script:TaskRestore -InputObject $taskDef | Out-Null
-    Write-LogHost "Registered task: $($Script:TaskRestore)" -Color Green
+    if ($PSCmdlet.ShouldProcess($Script:TaskRestore, 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $Script:TaskRestore -InputObject $taskDef | Out-Null
+        Write-LogHost "Registered task: $($Script:TaskRestore)" -Color Green
+    }
 } else {
     Write-Log "No triggers selected for '$($Script:TaskRestore)' — skipping registration."
 }
@@ -424,6 +439,7 @@ function Update-GpoIni {
         Safely appends a uacbio block to a GPO scripts .ini file without
         corrupting existing third-party sections.
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$IniPath,
         [Parameter(Mandatory)][string]$Section,        # e.g. 'Shutdown'
@@ -436,60 +452,71 @@ function Update-GpoIni {
 
     $dir = Split-Path $IniPath -Parent
     if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        Write-Log "Created GPO scripts directory: $dir"
+        if ($PSCmdlet.ShouldProcess($dir, 'Create GPO scripts directory')) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Write-Log "Created GPO scripts directory: $dir"
+        }
     }
 
     # Read existing content (or start fresh)
     $lines = if (Test-Path $IniPath) { Get-Content $IniPath -Encoding Unicode } else { @() }
 
-    # Check if uacbio block is already present
+    # Check if uacbio block is already present (idempotency guard)
     $marker = '# uacbio'
-    if ($lines | Where-Object { $_ -match [regex]::Escape($marker) }) {
+    if ($lines -contains $marker) {
         Write-Log "GPO ini '$IniPath' already contains uacbio block — skipping."
         return
     }
 
     # Locate the [Section] header; if missing, append it
     $sectionHeader = "[$Section]"
-    $sectionIdx    = ($lines | Select-String -Pattern "^\[$Section\]" -SimpleMatch).LineNumber
-    # LineNumber is 1-based
-
-    if ($null -eq $sectionIdx) {
-        # Section absent — append entire block
-        $lines += ''
-        $lines += $sectionHeader
-        $sectionIdx = $lines.Count  # points to the just-added header (1-based)
+    $sectionLineNo = $null
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -eq $sectionHeader) { $sectionLineNo = $i; break }
     }
 
-    # Determine the next available script index within this section
-    $idxInSection = ($lines | Select-String -Pattern "^(\d+)CmdLine=" -AllMatches |
-        ForEach-Object { [int]$_.Matches[0].Groups[1].Value } |
-        Measure-Object -Maximum).Maximum
-    $nextIdx = if ($null -eq $idxInSection) { 0 } else { $idxInSection + 1 }
+    if ($null -eq $sectionLineNo) {
+        # Section absent — append blank separator and header
+        $lines       += ''
+        $lines       += $sectionHeader
+        $sectionLineNo = $lines.Count - 1   # 0-based index of the just-added header
+    }
 
-    # Find insertion point: after section header, before next section or EOF
-    $insertAt = $sectionIdx  # 0-based index in array = LineNumber (1-based) - 1 = sectionIdx - 1 + 1
-    # Walk forward to find end of section
-    for ($i = $sectionIdx; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\[' -and $lines[$i] -ne $sectionHeader) { break }
-        $insertAt = $i + 1   # insert after this line
+    # Determine the next available script index scoped to the target section only.
+    # Scanning globally across sections would contaminate numbering when multiple
+    # sections (e.g. [Startup] and [Shutdown]) both have entries.
+    $nextIdx = 0
+    for ($i = $sectionLineNo + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[') { break }   # hit next section header — stop
+        if ($lines[$i] -match '^(\d+)CmdLine=') {
+            $candidate = [int]$Matches[1] + 1
+            if ($candidate -gt $nextIdx) { $nextIdx = $candidate }
+        }
+    }
+
+    # Find insertion point: immediately after the last line of the target section
+    $insertAt = $sectionLineNo + 1
+    for ($i = $sectionLineNo + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[') { break }   # next section — stop before it
+        $insertAt = $i + 1
     }
 
     # Build lines to insert
     $newLines = @(
-        "$nextIdx`CmdLine=$cmdLine",
-        "$nextIdx`Parameters=$cmdArgs",
+        "${nextIdx}CmdLine=$cmdLine",
+        "${nextIdx}Parameters=$cmdArgs",
         $marker
     )
 
-    # Splice into array
-    $before = $lines[0..([Math]::Max(0, $insertAt - 1))]
+    # Splice into array — guard the lower bound to avoid $lines[0..-1] on empty files
+    $before = if ($insertAt -gt 0) { $lines[0..($insertAt - 1)] } else { @() }
     $after  = if ($insertAt -lt $lines.Count) { $lines[$insertAt..($lines.Count - 1)] } else { @() }
     $result = $before + $newLines + $after
 
-    Set-Content -Path $IniPath -Value $result -Encoding Unicode
-    Write-Log "Updated GPO ini '$IniPath' — added [$Section] block at index $nextIdx."
+    if ($PSCmdlet.ShouldProcess($IniPath, "Write GPO [$Section] script configuration")) {
+        Set-Content -Path $IniPath -Value $result -Encoding Unicode
+        Write-Log "Updated GPO ini '$IniPath' — added [$Section] block at index $nextIdx."
+    }
 }
 
 $gpupdateNeeded = $false
@@ -510,12 +537,14 @@ if ('Startup' -in $GPScripts) {
 
 if ($gpupdateNeeded) {
     Write-LogHost 'Running gpupdate /force ...' -Color Cyan
-    try {
-        $gp = & gpupdate /force 2>&1
-        Write-Log "gpupdate output: $($gp -join ' ')"
-        Write-LogHost 'Group Policy updated.' -Color Green
-    } catch {
-        Write-Log "gpupdate failed: $_" -Level WARN
+    if ($PSCmdlet.ShouldProcess('Group Policy', 'Run gpupdate /force')) {
+        try {
+            $gp = & gpupdate /force 2>&1
+            Write-Log "gpupdate output: $($gp -join ' ')"
+            Write-LogHost 'Group Policy updated.' -Color Green
+        } catch {
+            Write-Log "gpupdate failed: $_" -Level WARN
+        }
     }
 }
 #endregion
