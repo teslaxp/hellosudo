@@ -69,7 +69,7 @@ $Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\
 $Script:TaskDisable = 'uacbio_Disable_Password'
 $Script:TaskRestore = 'uacbio_Restore_Password'
 $Script:RegExe      = "$env:SystemRoot\System32\reg.exe"
-$Script:GPMachine   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts"
+$Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
 #endregion
 
 #region ── Logging ──────────────────────────────────────────────────────────────
@@ -523,15 +523,13 @@ $gpupdateNeeded = $false
 
 if ('Shutdown' -in $GPScripts) {
     Write-LogHost 'Configuring GPO Shutdown script...' -Color Cyan
-    $iniPath = Join-Path $Script:GPMachine 'Scripts\shutdown.ini'
-    Update-GpoIni -IniPath $iniPath -Section 'Shutdown' -DisabledValue 0
+    Update-GpoIni -IniPath $Script:GPIniPath -Section 'Shutdown' -DisabledValue 0
     $gpupdateNeeded = $true
 }
 
 if ('Startup' -in $GPScripts) {
     Write-LogHost 'Configuring GPO Startup script...' -Color Cyan
-    $iniPath = Join-Path $Script:GPMachine 'Scripts\startup.ini'
-    Update-GpoIni -IniPath $iniPath -Section 'Startup' -DisabledValue 0
+    Update-GpoIni -IniPath $Script:GPIniPath -Section 'Startup' -DisabledValue 0
     $gpupdateNeeded = $true
 }
 

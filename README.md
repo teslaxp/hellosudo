@@ -143,7 +143,7 @@ Selects which system state transitions to register as Scheduled Task triggers.
 **Default:** `@('Shutdown')`  
 **Valid values:** `Startup`, `Shutdown`
 
-Configures Group Policy Machine Scripts (`shutdown.ini` / `startup.ini`) as an additional safety net to ensure `Disabled` is reset even if the Task Scheduler is bypassed (e.g., forced power-off).
+Configures Group Policy Machine Scripts (`scripts.ini`) as an additional safety net to ensure `Disabled` is reset even if the Task Scheduler is bypassed (e.g., forced power-off).
 
 ```powershell
 # Add both Shutdown and Startup GP scripts
@@ -213,8 +213,7 @@ The displayed values always reflect the *current* parameter values — whether t
 | UAC policy (core) | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` |
 | Scheduled Task (disable) | `\uacbio_Disable_Password` in Task Scheduler |
 | Scheduled Task (restore) | `\uacbio_Restore_Password` in Task Scheduler |
-| GPO Shutdown script | `C:\Windows\System32\GroupPolicy\Machine\Scripts\Scripts\shutdown.ini` |
-| GPO Startup script | `C:\Windows\System32\GroupPolicy\Machine\Scripts\Scripts\startup.ini` |
+| GPO scripts file | `C:\Windows\System32\GroupPolicy\Machine\Scripts\scripts.ini` |
 | Metadata registry key | `HKLM\SOFTWARE\uacbio` |
 | Log file | `C:\ProgramData\uacbio\logs\install.log` |
 
@@ -230,7 +229,7 @@ The uninstaller:
 
 1. Reads metadata from `HKLM\SOFTWARE\uacbio`
 2. Removes both scheduled tasks (`uacbio_Disable_Password`, `uacbio_Restore_Password`)
-3. Removes uacbio blocks from `shutdown.ini` and `startup.ini` (if present), then runs `gpupdate /force`
+3. Removes uacbio blocks from `scripts.ini` (`[Startup]` and/or `[Shutdown]` sections, if present), then runs `gpupdate /force`
 4. **Reverts `ConsentPromptBehaviorAdmin` and `PromptOnSecureDesktop`** to their original pre-install values (stored in metadata)
 5. Reverts the `PasswordProvider` `Disabled` value to its **original state** (as captured during install)
 6. Deletes the `HKLM\SOFTWARE\uacbio` metadata key
@@ -256,7 +255,7 @@ Example log lines:
 [2025-06-01 14:32:10] [INFO] OS detected   : Windows 11 Pro
 [2025-06-01 14:32:10] [INFO] Current 'Disabled' value: 0
 [2025-06-01 14:32:11] [INFO] Registered task: uacbio_Disable_Password
-[2025-06-01 14:32:11] [INFO] Updated GPO ini '...shutdown.ini' — added [Shutdown] block at index 0.
+[2025-06-01 14:32:11] [INFO] Updated GPO ini '...scripts.ini' — added [Shutdown] block at index 0.
 ```
 
 ---

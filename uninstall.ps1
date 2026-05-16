@@ -23,7 +23,7 @@ $Script:LogFile     = Join-Path $Script:LogDir 'uninstall.log'
 $Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
 $Script:TaskDisable = 'uacbio_Disable_Password'
 $Script:TaskRestore = 'uacbio_Restore_Password'
-$Script:GPMachine   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts"
+$Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
 $Script:DataDir     = 'C:\ProgramData\uacbio'
 #endregion
 
@@ -155,28 +155,50 @@ foreach ($taskName in @($Script:TaskDisable, $Script:TaskRestore)) {
 function Remove-UacbioGpoBlock {
     <#
     .SYNOPSIS
-        Removes the lines that were added by uacbio from a GPO scripts .ini file.
-        Identifies the block using the '# uacbio' marker line and removes the
-        two preceding lines (CmdLine and Parameters entries) plus the marker itself.
+        Removes the uacbio-added lines from the specified section of scripts.ini.
+        Scopes the search to the target section so that removing one section's
+        block does not affect another section's block in the same file.
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$IniPath)
+    param(
+        [Parameter(Mandatory)][string]$IniPath,
+        [Parameter(Mandatory)][string]$Section    # e.g. 'Shutdown' or 'Startup'
+    )
 
     if (-not (Test-Path $IniPath)) {
         Write-Log "GPO ini not found, nothing to clean: $IniPath" -Level WARN
         return
     }
 
-    $lines  = Get-Content $IniPath -Encoding Unicode
-    $marker = '# uacbio'
-    $markerIndices = @()
+    $lines         = Get-Content $IniPath -Encoding Unicode
+    $sectionHeader = "[$Section]"
+    $marker        = '# uacbio'
 
+    # Locate the target section header
+    $sectionStart = $null
     for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -eq $sectionHeader) { $sectionStart = $i; break }
+    }
+
+    if ($null -eq $sectionStart) {
+        Write-Log "Section '$sectionHeader' not found in '$IniPath' — nothing to remove."
+        return
+    }
+
+    # Determine where this section ends (next section header or EOF)
+    $sectionEnd = $lines.Count - 1
+    for ($i = $sectionStart + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[') { $sectionEnd = $i - 1; break }
+    }
+
+    # Collect marker indices only within this section
+    $markerIndices = @()
+    for ($i = $sectionStart; $i -le $sectionEnd; $i++) {
         if ($lines[$i] -eq $marker) { $markerIndices += $i }
     }
 
     if ($markerIndices.Count -eq 0) {
-        Write-Log "No uacbio marker found in '$IniPath' — nothing to remove."
+        Write-Log "No uacbio marker found in [$Section] section of '$IniPath' — nothing to remove."
         return
     }
 
@@ -196,25 +218,23 @@ function Remove-UacbioGpoBlock {
         }
     }
 
-    if ($PSCmdlet.ShouldProcess($IniPath, 'Remove uacbio GPO script block')) {
+    if ($PSCmdlet.ShouldProcess($IniPath, "Remove uacbio [$Section] script block")) {
         Set-Content -Path $IniPath -Value $result.ToArray() -Encoding Unicode
-        Write-Log "Cleaned uacbio block from '$IniPath'."
+        Write-Log "Cleaned uacbio block from [$Section] section of '$IniPath'."
     }
 }
 
 $gpupdateNeeded = $false
 
 if ($installedGP -contains 'Shutdown') {
-    $iniPath = Join-Path $Script:GPMachine 'Scripts\shutdown.ini'
-    Write-LogHost "Cleaning GPO shutdown.ini ..." -Color Cyan
-    Remove-UacbioGpoBlock -IniPath $iniPath
+    Write-LogHost "Cleaning GPO [Shutdown] section from scripts.ini ..." -Color Cyan
+    Remove-UacbioGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown'
     $gpupdateNeeded = $true
 }
 
 if ($installedGP -contains 'Startup') {
-    $iniPath = Join-Path $Script:GPMachine 'Scripts\startup.ini'
-    Write-LogHost "Cleaning GPO startup.ini ..." -Color Cyan
-    Remove-UacbioGpoBlock -IniPath $iniPath
+    Write-LogHost "Cleaning GPO [Startup] section from scripts.ini ..." -Color Cyan
+    Remove-UacbioGpoBlock -IniPath $Script:GPIniPath -Section 'Startup'
     $gpupdateNeeded = $true
 }
 
