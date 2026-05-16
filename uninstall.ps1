@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Uninstalls uacbio — removes all scheduled tasks, GPO scripts, and reverts
@@ -201,7 +201,7 @@ function Remove-UacbioGpoBlock {
         return
     }
 
-    $lines         = Get-Content $IniPath -Encoding Unicode
+    $lines         = @(Get-Content $IniPath -Encoding Unicode)
     $sectionHeader = "[$Section]"
     $marker        = '# uacbio'
 

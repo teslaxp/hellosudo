@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Installs uacbio — a Windows UAC biometric fix for local accounts.
@@ -205,8 +205,8 @@ function Test-NgcPinConfigured {
     #>
     $ngcKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin\Credentials'
     if (-not (Test-Path $ngcKey)) { return $false }
-    $children = Get-ChildItem -Path $ngcKey -ErrorAction SilentlyContinue
-    return ($null -ne $children -and $children.Count -gt 0)
+    $children = @(Get-ChildItem -Path $ngcKey -ErrorAction SilentlyContinue)
+    return ($children.Count -gt 0)
 }
 
 Write-LogHost 'Running Windows Hello / NGC pre-flight check...' -Color Cyan
@@ -420,101 +420,136 @@ function Get-RegAction {
 #region ── Task Scheduler ────────────────────────────────────────────────────────
 Write-LogHost 'Configuring scheduled tasks...' -Color Cyan
 
-# Common principal — SYSTEM, highest available
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+# Build the raw registry key path used inside reg.exe arguments
+$Script:CPKeyRaw = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
 
-# Common action builders
-function New-RegAction {
-    param([int]$DisabledValue)
-    $keyPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
-    $args    = "ADD `"$keyPath`" /v Disabled /t REG_DWORD /d $DisabledValue /f"
-    return New-ScheduledTaskAction -Execute $Script:RegExe -Argument $args
+# XML-escape helper — needed for embedding values inside Task XML strings.
+# Using XML avoids PSTypeName mismatches when mixing trigger types in PS5.1:
+# New-CimInstance -ClientOnly omits parent-class PSTypeNames (e.g. MSFT_TaskTrigger),
+# causing New-ScheduledTask -Trigger to reject the objects.
+function ConvertTo-XmlString { param([string]$s)
+    $s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;' -replace "'","&apos;"
+}
+
+function New-UacbioTaskXml {
+    <#
+    .SYNOPSIS
+        Returns a Task Scheduler XML string for a uacbio task.
+    .PARAMETER TriggerXml
+        Array of pre-formed XML trigger element strings.
+    .PARAMETER ActionArgs
+        Arguments to pass to reg.exe. Will be XML-escaped automatically.
+    .PARAMETER Description
+        Human-readable task description.
+    #>
+    [CmdletBinding()] param(
+        [string[]]$TriggerXml,
+        [string]$ActionArgs,
+        [string]$Description
+    )
+    $triggersBlock = ($TriggerXml | ForEach-Object { "    $_" }) -join "`r`n"
+    $escapedArgs   = ConvertTo-XmlString $ActionArgs
+    $escapedDesc   = ConvertTo-XmlString $Description
+    return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>$escapedDesc</Description>
+  </RegistrationInfo>
+  <Triggers>
+$triggersBlock
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$($Script:RegExe)</Command>
+      <Arguments>$escapedArgs</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+}
+
+function Register-UacbioTask {
+    [CmdletBinding(SupportsShouldProcess)] param(
+        [string]$TaskName,
+        [string]$Xml
+    )
+    if (Get-ScheduledTask -TaskName $TaskName -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
+        Write-Log "Task '$TaskName' already exists — replacing."
+        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$TaskName", 'Unregister existing scheduled task')) {
+            Unregister-ScheduledTask -TaskName $TaskName -TaskPath $Script:TaskPath -Confirm:$false
+        }
+    }
+    if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$TaskName", 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $TaskName -TaskPath $Script:TaskPath -Xml $Xml | Out-Null
+        Write-LogHost "Registered task: $($Script:TaskPath)$TaskName" -Color Green
+        Write-Log "Registered task: $($Script:TaskPath)$TaskName"
+    }
 }
 
 # ── Task: uacbio_Disable_Password (Disabled=1) ──────────────────────────────
-$disableTriggers = [System.Collections.Generic.List[CimInstance]]::new()
+$disableTriggerXml = @()
 
 if ('Logon' -in $Tasks) {
     Write-Log "Adding Logon trigger to $($Script:TaskDisable)"
-    $disableTriggers.Add((New-ScheduledTaskTrigger -AtLogOn))
+    $disableTriggerXml += '<LogonTrigger><Enabled>true</Enabled></LogonTrigger>'
 }
 if ('Unlock' -in $Tasks) {
     Write-Log "Adding Workstation Unlock trigger to $($Script:TaskDisable)"
-    $unlockCim = New-CimInstance -Namespace 'Root\Microsoft\Windows\TaskScheduler' `
-                    -ClassName 'MSFT_TaskSessionStateChangeTrigger' `
-                    -ClientOnly `
-                    -Property @{ StateChange = [uint32]8 }   # 8 = SessionUnlock
-    $disableTriggers.Add($unlockCim)
+    $disableTriggerXml += '<SessionStateChangeTrigger><StateChange>SessionUnlock</StateChange><Enabled>true</Enabled></SessionStateChangeTrigger>'
 }
 
-if ($disableTriggers.Count -gt 0) {
-    $action   = New-RegAction -DisabledValue 1
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-    $taskDef  = New-ScheduledTask -Action $action -Principal $principal -Trigger $disableTriggers -Settings $settings `
-                    -Description 'uacbio: Disables PasswordProvider so biometrics appear first in UAC.'
-
-    if (Get-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
-        Write-Log "Task '$($Script:TaskDisable)' already exists — replacing."
-        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskDisable)", 'Unregister existing scheduled task')) {
-            Unregister-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -Confirm:$false
-        }
-    }
-    if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskDisable)", 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $Script:TaskDisable -TaskPath $Script:TaskPath -InputObject $taskDef | Out-Null
-        Write-LogHost "Registered task: $($Script:TaskPath)$($Script:TaskDisable)" -Color Green
-    }
+if ($disableTriggerXml.Count -gt 0) {
+    $disableArgs = "ADD `"$($Script:CPKeyRaw)`" /v Disabled /t REG_DWORD /d 1 /f"
+    $disableXml  = New-UacbioTaskXml -TriggerXml $disableTriggerXml -ActionArgs $disableArgs `
+                       -Description 'uacbio: Disables PasswordProvider so biometrics appear first in UAC.'
+    Register-UacbioTask -TaskName $Script:TaskDisable -Xml $disableXml
 } else {
     Write-Log "No triggers selected for '$($Script:TaskDisable)' — skipping registration."
 }
 
 # ── Task: uacbio_Restore_Password (Disabled=0) ──────────────────────────────
-$restoreTriggers = [System.Collections.Generic.List[CimInstance]]::new()
+$restoreTriggerXml = @()
 
 if ('Startup' -in $Tasks) {
     Write-Log "Adding Startup trigger to $($Script:TaskRestore)"
-    $restoreTriggers.Add((New-ScheduledTaskTrigger -AtStartup))
+    $restoreTriggerXml += '<BootTrigger><Enabled>true</Enabled></BootTrigger>'
 }
 if ('Lock' -in $Tasks) {
     Write-Log "Adding Workstation Lock trigger to $($Script:TaskRestore)"
-    $lockCim = New-CimInstance -Namespace 'Root\Microsoft\Windows\TaskScheduler' `
-                 -ClassName 'MSFT_TaskSessionStateChangeTrigger' `
-                 -ClientOnly `
-                 -Property @{ StateChange = [uint32]7 }   # 7 = SessionLock
-    $restoreTriggers.Add($lockCim)
+    $restoreTriggerXml += '<SessionStateChangeTrigger><StateChange>SessionLock</StateChange><Enabled>true</Enabled></SessionStateChangeTrigger>'
 }
 if ('Logoff' -in $Tasks) {
     Write-Log "Adding Logoff (Event 7002) trigger to $($Script:TaskRestore)"
-    # Logoff via Event Log subscription: System log, Winlogon source, Event ID 7002
-    $logoffXml = @'
-<QueryList>
-  <Query Id="0" Path="System">
-    <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Winlogon'] and EventID=7002]]</Select>
-  </Query>
-</QueryList>
-'@
-    $logoffCim = New-CimInstance -Namespace 'Root\Microsoft\Windows\TaskScheduler' `
-                     -ClassName 'MSFT_TaskEventTrigger' `
-                     -ClientOnly `
-                     -Property @{ Subscription = $logoffXml; Enabled = $true }
-    $restoreTriggers.Add($logoffCim)
+    # The subscription XML must be entity-encoded when embedded inside the outer Task XML
+    $logoffSubscription = ConvertTo-XmlString (
+        '<QueryList><Query Id="0" Path="System">' +
+        '<Select Path="System">*[System[Provider[@Name=''Microsoft-Windows-Winlogon''] and EventID=7002]]</Select>' +
+        '</Query></QueryList>'
+    )
+    $restoreTriggerXml += "<EventTrigger><Enabled>true</Enabled><Subscription>$logoffSubscription</Subscription></EventTrigger>"
 }
 
-if ($restoreTriggers.Count -gt 0) {
-    $action   = New-RegAction -DisabledValue 0
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-    $taskDef  = New-ScheduledTask -Action $action -Principal $principal -Trigger $restoreTriggers -Settings $settings `
-                    -Description 'uacbio: Restores PasswordProvider so the standard UAC flow is preserved outside elevated sessions.'
-
-    if (Get-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
-        Write-Log "Task '$($Script:TaskRestore)' already exists — replacing."
-        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskRestore)", 'Unregister existing scheduled task')) {
-            Unregister-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -Confirm:$false
-        }
-    }
-    if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$($Script:TaskRestore)", 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $Script:TaskRestore -TaskPath $Script:TaskPath -InputObject $taskDef | Out-Null
-        Write-LogHost "Registered task: $($Script:TaskPath)$($Script:TaskRestore)" -Color Green
-    }
+if ($restoreTriggerXml.Count -gt 0) {
+    $restoreArgs = "ADD `"$($Script:CPKeyRaw)`" /v Disabled /t REG_DWORD /d 0 /f"
+    $restoreXml  = New-UacbioTaskXml -TriggerXml $restoreTriggerXml -ActionArgs $restoreArgs `
+                       -Description 'uacbio: Restores PasswordProvider so the standard UAC flow is preserved outside elevated sessions.'
+    Register-UacbioTask -TaskName $Script:TaskRestore -Xml $restoreXml
 } else {
     Write-Log "No triggers selected for '$($Script:TaskRestore)' — skipping registration."
 }
@@ -546,8 +581,9 @@ function Update-GpoIni {
         }
     }
 
-    # Read existing content (or start fresh)
-    $lines = if (Test-Path $IniPath) { Get-Content $IniPath -Encoding Unicode } else { @() }
+    # Read existing content (or start fresh); @() wrapping ensures array even when
+    # Get-Content returns $null (empty file) or a single string (one-line file).
+    $lines = if (Test-Path $IniPath) { @(Get-Content $IniPath -Encoding Unicode) } else { @() }
 
     # Check if uacbio block is already present (idempotency guard)
     $marker = '# uacbio'
