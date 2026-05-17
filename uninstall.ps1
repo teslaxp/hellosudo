@@ -18,8 +18,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:EventSource = 'hellosudo'
-$Script:MetaKey     = 'HKLM:\SOFTWARE\hellosudo'
+$Script:LogDir     = 'C:\ProgramData\hellosudo\logs'
+$Script:LogFile    = Join-Path $Script:LogDir 'uninstall.log'
+$Script:DataDir    = 'C:\ProgramData\hellosudo'
+$Script:MetaKey    = 'HKLM:\SOFTWARE\hellosudo'
 $Script:TaskPath    = '\hellosudo\'
 $Script:TaskDisable = 'hellosudo_Disable_Password'
 $Script:TaskRestore = 'hellosudo_Restore_Password'
@@ -32,26 +34,11 @@ function Write-Log {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO'
     )
-    $entryType = switch ($Level) {
-        'WARN'  { 'Warning' }
-        'ERROR' { 'Error' }
-        default { 'Information' }
+    if (-not (Test-Path $Script:LogDir)) {
+        $null = New-Item -ItemType Directory -Path $Script:LogDir -Force
     }
-    $eventId = switch ($Level) {
-        'ERROR' { 1002 }
-        'WARN'  { 1001 }
-        default { 1000 }
-    }
-
-    try {
-        if (-not [System.Diagnostics.EventLog]::SourceExists($Script:EventSource)) {
-            [System.Diagnostics.EventLog]::CreateEventSource($Script:EventSource, 'Application')
-        }
-        Write-EventLog -LogName 'Application' -Source $Script:EventSource `
-            -EventId $eventId -EntryType $entryType -Message $Message -WhatIf:$false
-    } catch {
-        Write-Verbose "[$Level] $Message"
-    }
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $Script:LogFile -Value "[$timestamp] [$Level] $Message" -Encoding UTF8
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -364,15 +351,27 @@ if (Test-Path $Script:MetaKey) {
 }
 #endregion
 
-#region ── Remove Event Log Source ───────────────────────────────────────────────
-try {
-    if ([System.Diagnostics.EventLog]::SourceExists($Script:EventSource)) {
-        Write-Log 'Removing Windows Event Log source registration...'
-        [System.Diagnostics.EventLog]::DeleteEventSource($Script:EventSource)
-        Write-Host "  Event log source '$($Script:EventSource)' removed." -ForegroundColor Green
+#region ── Remove Data Directory (if empty) ──────────────────────────────────────
+Write-LogHost 'Checking data directory for cleanup...' -Color Cyan
+Write-Log "Checking $($Script:DataDir) for cleanup."
+
+if (Test-Path -LiteralPath $Script:DataDir) {
+    # Keep the current log file open during cleanup — exclude it from the count.
+    $remaining = @(Get-ChildItem -LiteralPath $Script:DataDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $Script:LogFile })
+    if ($remaining.Count -eq 0) {
+        # Log final line before the directory is removed.
+        Write-Log 'Removing data directory — all tasks complete.'
+        try {
+            Remove-Item -LiteralPath $Script:DataDir -Recurse -Force
+            Write-Host "  Data directory removed: $($Script:DataDir)" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARNING: Could not remove data directory: $($Script:DataDir)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Log "Data directory not empty — left in place: $($Script:DataDir)" -Level WARN
+        Write-Host "  Data directory not empty — left in place: $($Script:DataDir)" -ForegroundColor Yellow
     }
-} catch {
-    Write-Host "  WARNING: Could not remove event log source '$($Script:EventSource)'. Remove manually if desired." -ForegroundColor Yellow
 }
 #endregion
 

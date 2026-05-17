@@ -116,13 +116,12 @@ All original values are written to `HKLM:\SOFTWARE\hellosudo` before any changes
 
 ### Logs
 
-All installation and uninstallation events are written to the **Windows Application Event Log**:
+| Script | Log location |
+|---|---|
+| install.ps1 | `C:\ProgramData\hellosudo\logs\install.log` |
+| uninstall.ps1 | `C:\ProgramData\hellosudo\logs\uninstall.log` |
 
-```
-Event Viewer → Windows Logs → Application → Source: hellosudo
-```
-
-Event IDs: `1000` (Info), `1001` (Warning), `1002` (Error). The event source registration (`HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\hellosudo`) is created automatically on first run and removed by the uninstaller.
+Logs are plain UTF-8 text files with `[timestamp] [LEVEL] message` entries. Open them in any text editor or tail them with `Get-Content -Wait`.
 
 ---
 

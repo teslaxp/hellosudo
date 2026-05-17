@@ -97,8 +97,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:EventSource = 'hellosudo'
-$Script:MetaKey     = 'HKLM:\SOFTWARE\hellosudo'
+$Script:LogDir     = 'C:\ProgramData\hellosudo\logs'
+$Script:LogFile    = Join-Path $Script:LogDir 'install.log'
+$Script:MetaKey    = 'HKLM:\SOFTWARE\hellosudo'
 $Script:CPKey       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
 $Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $Script:TaskPath    = '\hellosudo\'
@@ -114,28 +115,11 @@ function Write-Log {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO'
     )
-    $entryType = switch ($Level) {
-        'WARN'  { 'Warning' }
-        'ERROR' { 'Error' }
-        default { 'Information' }
+    if (-not (Test-Path $Script:LogDir)) {
+        $null = New-Item -ItemType Directory -Path $Script:LogDir -Force
     }
-    $eventId = switch ($Level) {
-        'ERROR' { 1002 }
-        'WARN'  { 1001 }
-        default { 1000 }
-    }
-
-    # Write to the Windows Application event log.
-    # Source is registered on first use; both calls are no-ops if already correct.
-    try {
-        if (-not [System.Diagnostics.EventLog]::SourceExists($Script:EventSource)) {
-            [System.Diagnostics.EventLog]::CreateEventSource($Script:EventSource, 'Application')
-        }
-        Write-EventLog -LogName 'Application' -Source $Script:EventSource `
-            -EventId $eventId -EntryType $entryType -Message $Message -WhatIf:$false
-    } catch {
-        Write-Verbose "[$Level] $Message"
-    }
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $Script:LogFile -Value "[$timestamp] [$Level] $Message" -Encoding UTF8
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -778,7 +762,7 @@ if ($GPScripts.Count -gt 0) {
 }
 Write-Host ("  [OK] Windows sudo $sudoStatus") -ForegroundColor Green
 Write-Host ('  [OK] Recovery metadata saved to HKLM:\SOFTWARE\hellosudo') -ForegroundColor Green
-Write-Host ('  [OK] Logs: Event Viewer → Windows Logs → Application → Source: hellosudo') -ForegroundColor Green
+Write-Host ('  [OK] Logs: ' + $Script:LogFile) -ForegroundColor Green
 Write-Host ''
 Write-LogHost ('=' * 60) -Color Green
 Write-LogHost ' hellosudo installation complete.' -Color Green
