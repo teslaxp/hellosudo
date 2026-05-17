@@ -11,6 +11,7 @@ setlocal enabledelayedexpansion
 ::  Requires Windows 11. Administrative elevation is requested as needed.
 
 set "PROVIDER_GUID={60b78e88-ead8-445c-9cfd-0b87f74ea6cd}"
+for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\hellosudo" /v TargetGUID 2^>nul') do set "PROVIDER_GUID=%%A"
 set "PROVIDER_KEY=HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\%PROVIDER_GUID%"
 set "UAC_KEY=HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 set "SUDO_KEY=HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo"
