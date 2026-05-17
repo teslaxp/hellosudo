@@ -1,12 +1,13 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uninstalls uacbio — removes all scheduled tasks, GPO scripts, and reverts
+    Uninstalls hellosudo — removes all scheduled tasks, GPO scripts, and reverts
     the PasswordProvider credential provider registry state.
 
 .DESCRIPTION
-    Reads installation metadata from HKLM:\SOFTWARE\uacbio to discover what
+    Reads installation metadata from HKLM:\SOFTWARE\hellosudo to discover what
     was installed, then cleanly reverses every change made by install.ps1.
+    Falls back to HKLM:\SOFTWARE\uacbio for legacy uacbio v1.x installs.
 
 .EXAMPLE
     .\uninstall.ps1
@@ -18,14 +19,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:LogDir      = 'C:\ProgramData\uacbio\logs'
+$Script:LogDir      = 'C:\ProgramData\hellosudo\logs'
 $Script:LogFile     = Join-Path $Script:LogDir 'uninstall.log'
-$Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
-$Script:TaskPath    = '\uacbio\'
-$Script:TaskDisable = 'uacbio_Disable_Password'
-$Script:TaskRestore = 'uacbio_Restore_Password'
+$Script:MetaKey     = 'HKLM:\SOFTWARE\hellosudo'
+$Script:TaskPath    = '\hellosudo\'
+$Script:TaskDisable = 'hellosudo_Disable_Password'
+$Script:TaskRestore = 'hellosudo_Restore_Password'
 $Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
-$Script:DataDir     = 'C:\ProgramData\uacbio'
+$Script:DataDir     = 'C:\ProgramData\hellosudo'
+
+# Legacy names from v1.x (uacbio) — checked during cleanup for backward compatibility
+$Script:LegacyMetaKey     = 'HKLM:\SOFTWARE\uacbio'
+$Script:LegacyTaskPath    = '\uacbio\'
+$Script:LegacyTaskDisable = 'uacbio_Disable_Password'
+$Script:LegacyTaskRestore = 'uacbio_Restore_Password'
+$Script:LegacyDataDir     = 'C:\ProgramData\uacbio'
 #endregion
 
 #region ── Logging ──────────────────────────────────────────────────────────────
@@ -98,26 +106,34 @@ if (-not (Test-IsAdmin)) { Invoke-SelfElevate }
 
 #region ── Log Banner ────────────────────────────────────────────────────────────
 Write-LogHost ('=' * 60) -Color Cyan
-Write-LogHost ' uacbio  —  Uninstallation Script' -Color Cyan
+Write-LogHost ' hellosudo  —  Uninstallation Script' -Color Cyan
 Write-LogHost ('=' * 60) -Color Cyan
 #endregion
 
 #region ── Read Metadata ─────────────────────────────────────────────────────────
-Write-LogHost 'Reading installation metadata from HKLM:\SOFTWARE\uacbio ...' -Color Cyan
+Write-LogHost 'Reading installation metadata...' -Color Cyan
 
-if (-not (Test-Path $Script:MetaKey)) {
-    $msg = "Metadata key '$($Script:MetaKey)' not found. uacbio may not be installed, or was already uninstalled."
+$activeMetaKey = $null
+if (Test-Path $Script:MetaKey) {
+    $activeMetaKey = $Script:MetaKey
+    Write-Log "Found metadata at: $Script:MetaKey"
+} elseif (Test-Path $Script:LegacyMetaKey) {
+    $activeMetaKey = $Script:LegacyMetaKey
+    Write-Log "Found legacy metadata at: $Script:LegacyMetaKey (uacbio v1.x install detected)"
+    Write-LogHost '  Legacy uacbio installation detected — performing full cleanup.' -Color Yellow
+}
+
+if ($null -eq $activeMetaKey) {
+    $msg = "No installation metadata found (checked: $($Script:MetaKey), $($Script:LegacyMetaKey)). hellosudo may not be installed."
     Write-LogHost $msg -Level ERROR -Color Red
     Write-Host 'Uninstallation aborted.' -ForegroundColor Red
     exit 1
 }
 
-$meta = Get-ItemProperty -Path $Script:MetaKey
+$meta = Get-ItemProperty -Path $activeMetaKey
 
 $targetGUID              = $meta.TargetGUID
 $originalDisabledState   = if ($null -ne $meta.OriginalDisabledState)   { [int]$meta.OriginalDisabledState }   else { 0 }
-# OriginalDisabledExisted: 1=value was present, 0=value was absent (written by install.ps1 >= v2).
-# Fall back to ($originalDisabledState -ne 0) for backward compatibility with older metadata.
 $originalDisabledExisted = if ($meta.PSObject.Properties['OriginalDisabledExisted']) {
     [bool]([int]$meta.OriginalDisabledExisted)
 } else {
@@ -140,78 +156,90 @@ Write-Log "OriginalSecureDesktop   : $originalSecureDesktop"
 #region ── Remove Scheduled Tasks ────────────────────────────────────────────────
 Write-LogHost 'Removing scheduled tasks...' -Color Cyan
 
-foreach ($taskName in @($Script:TaskDisable, $Script:TaskRestore)) {
-    if (Get-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
-        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$taskName", 'Unregister scheduled task')) {
-            Unregister-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -Confirm:$false
-            Write-LogHost "  Removed task: $($Script:TaskPath)$taskName" -Color Green
+# Try current and legacy task names/paths
+$taskPairs = @(
+    @{ Path = $Script:TaskPath;       Disable = $Script:TaskDisable;       Restore = $Script:TaskRestore }
+    @{ Path = $Script:LegacyTaskPath; Disable = $Script:LegacyTaskDisable; Restore = $Script:LegacyTaskRestore }
+)
+
+foreach ($pair in $taskPairs) {
+    foreach ($taskName in @($pair.Disable, $pair.Restore)) {
+        if (Get-ScheduledTask -TaskName $taskName -TaskPath $pair.Path -ErrorAction SilentlyContinue) {
+            if ($PSCmdlet.ShouldProcess("$($pair.Path)$taskName", 'Unregister scheduled task')) {
+                Unregister-ScheduledTask -TaskName $taskName -TaskPath $pair.Path -Confirm:$false
+                Write-LogHost "  Removed task: $($pair.Path)$taskName" -Color Green
+            }
         }
-    } else {
-        Write-Log "  Task not found (already removed?): $($Script:TaskPath)$taskName" -Level WARN
     }
 }
 
-# Remove the \uacbio\ Task Scheduler folder if it is now empty.
-# Unregister-ScheduledTask does not delete folders, so we use the
-# Schedule.Service COM object which exposes folder management APIs.
-if ($PSCmdlet.ShouldProcess($Script:TaskPath, 'Delete empty Task Scheduler folder')) {
-    try {
-        $schedService = New-Object -ComObject 'Schedule.Service'
-        $schedService.Connect()
-        $rootFolder   = $schedService.GetFolder('\')
-        $uacbioFolder = $null
-        try { $uacbioFolder = $schedService.GetFolder($Script:TaskPath) } catch {}
+# Remove Task Scheduler folders (current and legacy) if empty
+foreach ($folderName in @('hellosudo', 'uacbio')) {
+    $folderPath = "\$folderName\"
+    if ($PSCmdlet.ShouldProcess($folderPath, 'Delete empty Task Scheduler folder')) {
+        try {
+            $schedService = New-Object -ComObject 'Schedule.Service'
+            $schedService.Connect()
+            $rootFolder   = $schedService.GetFolder('\')
+            $tsFolder     = $null
+            try { $tsFolder = $schedService.GetFolder($folderPath) } catch {}
 
-        if ($null -ne $uacbioFolder) {
-            $remainingTasks = $uacbioFolder.GetTasks(0)   # 0 = exclude hidden
-            if ($remainingTasks.Count -eq 0) {
-                $rootFolder.DeleteFolder('uacbio', 0)
-                Write-LogHost "  Task Scheduler folder '$($Script:TaskPath)' deleted." -Color Green
-                Write-Log "Task Scheduler folder '$($Script:TaskPath)' deleted."
-            } else {
-                Write-LogHost "  Task Scheduler folder '$($Script:TaskPath)' still contains $($remainingTasks.Count) task(s) — left in place." -Level WARN -Color Yellow
-                Write-Log "Folder '$($Script:TaskPath)' not deleted — $($remainingTasks.Count) task(s) remain." -Level WARN
+            if ($null -ne $tsFolder) {
+                $remainingTasks = $tsFolder.GetTasks(0)
+                if ($remainingTasks.Count -eq 0) {
+                    $rootFolder.DeleteFolder($folderName, 0)
+                    Write-LogHost "  Task Scheduler folder '$folderPath' deleted." -Color Green
+                } else {
+                    Write-Log "Folder '$folderPath' still has $($remainingTasks.Count) task(s) — left in place." -Level WARN
+                }
             }
-        } else {
-            Write-Log "Task Scheduler folder '$($Script:TaskPath)' not found — nothing to delete."
+        } catch {
+            Write-Log "Could not manage Task Scheduler folder '$folderPath': $_" -Level WARN
         }
-    } catch {
-        Write-Log "Could not delete Task Scheduler folder '$($Script:TaskPath)': $_" -Level WARN
-        Write-LogHost "  WARNING: Could not remove Task Scheduler folder '$($Script:TaskPath)'. Remove it manually if desired." -Level WARN -Color Yellow
     }
 }
 #endregion
 
 #region ── Clean GPO Script INI Files ────────────────────────────────────────────
-function Remove-UacbioGpoBlock {
+function Remove-HellosudoGpoBlock {
     <#
     .SYNOPSIS
-        Removes the uacbio-added lines from the specified section of scripts.ini.
+        Removes the hellosudo-added lines from the specified section of scripts.ini.
         Scopes the search to the target section so that removing one section's
         block does not affect another section's block in the same file.
+    .NOTES
+        Internal helper — no SupportsShouldProcess to avoid console-prompt hangs
+        in non-interactive sudo sessions.
+        Uses ArrayList throughout for reliable .Count under Set-StrictMode -Version Latest.
+        Uses -LiteralPath to avoid wildcard expansion on bracket chars in paths.
     #>
-    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$IniPath,
-        [Parameter(Mandatory)][string]$Section    # e.g. 'Shutdown' or 'Startup'
+        [Parameter(Mandatory)][string]$Section,
+        [string]$Marker = '# hellosudo'
     )
+    $marker = $Marker
 
-    if (-not (Test-Path $IniPath)) {
+    if (-not (Test-Path -LiteralPath $IniPath)) {
         Write-Log "GPO ini not found, nothing to clean: $IniPath" -Level WARN
         return
     }
 
-    $lines         = @(Get-Content $IniPath -Encoding Unicode)
+    # Load into ArrayList — .Count is a native .NET property, always reliable
+    $lines = [System.Collections.ArrayList]::new()
+    foreach ($line in (Get-Content -LiteralPath $IniPath -Encoding Unicode)) {
+        [void]$lines.Add($line)
+    }
+
     $sectionHeader = "[$Section]"
-    $marker        = '# uacbio'
 
     # Locate the target section header
-    $sectionStart = $null
+    $sectionStart = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -eq $sectionHeader) { $sectionStart = $i; break }
     }
 
-    if ($null -eq $sectionStart) {
+    if ($sectionStart -eq -1) {
         Write-Log "Section '$sectionHeader' not found in '$IniPath' — nothing to remove."
         return
     }
@@ -223,18 +251,20 @@ function Remove-UacbioGpoBlock {
     }
 
     # Collect marker indices only within this section
-    $markerIndices = @()
+    $markerIndices = [System.Collections.Generic.List[int]]::new()
     for ($i = $sectionStart; $i -le $sectionEnd; $i++) {
-        if ($lines[$i] -eq $marker) { $markerIndices += $i }
+        if ($lines[$i] -eq $marker) { [void]$markerIndices.Add($i) }
     }
 
     if ($markerIndices.Count -eq 0) {
-        Write-Log "No uacbio marker found in [$Section] section of '$IniPath' — nothing to remove."
+        Write-Log "No marker '$marker' found in [$Section] section of '$IniPath' — nothing to remove."
         return
     }
 
     # Remove from bottom up to keep earlier indices stable
-    $result = [System.Collections.Generic.List[string]]($lines)
+    $result = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in $lines) { [void]$result.Add($l) }
+
     foreach ($idx in ($markerIndices | Sort-Object -Descending)) {
         # Remove marker line
         $result.RemoveAt($idx)
@@ -249,23 +279,23 @@ function Remove-UacbioGpoBlock {
         }
     }
 
-    if ($PSCmdlet.ShouldProcess($IniPath, "Remove uacbio [$Section] script block")) {
-        Set-Content -Path $IniPath -Value $result.ToArray() -Encoding Unicode
-        Write-Log "Cleaned uacbio block from [$Section] section of '$IniPath'."
-    }
+    Set-Content -LiteralPath $IniPath -Value $result.ToArray() -Encoding Unicode
+    Write-Log "Cleaned '$marker' block from [$Section] section of '$IniPath'."
 }
 
 $gpupdateNeeded = $false
 
 if ($installedGP -contains 'Shutdown') {
     Write-LogHost "Cleaning GPO [Shutdown] section from scripts.ini ..." -Color Cyan
-    Remove-UacbioGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown'
+    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown' -Marker '# hellosudo'
+    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown' -Marker '# uacbio'
     $gpupdateNeeded = $true
 }
 
 if ($installedGP -contains 'Startup') {
     Write-LogHost "Cleaning GPO [Startup] section from scripts.ini ..." -Color Cyan
-    Remove-UacbioGpoBlock -IniPath $Script:GPIniPath -Section 'Startup'
+    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Startup' -Marker '# hellosudo'
+    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Startup' -Marker '# uacbio'
     $gpupdateNeeded = $true
 }
 
@@ -311,78 +341,72 @@ Write-LogHost "  UAC policy reverted successfully." -Color Green
 #endregion
 
 #region ── Revert Registry 'Disabled' Value ─────────────────────────────────────
-Write-LogHost "Reverting credential provider 'Disabled' value..." -Color Cyan
+# Always set Disabled=0 (provider enabled) on uninstall.
+# Restoring the "original" value is unreliable: any logon between install and
+# uninstall would have set Disabled=1 via the scheduled task, corrupting the
+# saved original on any subsequent reinstall. When removing uacbio the user
+# always wants the PasswordProvider active again (Disabled=0).
+Write-LogHost "Re-enabling credential provider (Disabled=0)..." -Color Cyan
 
 $cpKeyPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$targetGUID"
 
 if (Test-Path $cpKeyPath) {
-    if ($originalDisabledExisted) {
-        # Value was explicitly present before install — restore it to its original DWORD
-        if ($PSCmdlet.ShouldProcess($cpKeyPath, "Restore Disabled = $originalDisabledState")) {
-            Set-ItemProperty -Path $cpKeyPath -Name 'Disabled' -Value $originalDisabledState -Type DWord
-            Write-Log "Restored 'Disabled' to $originalDisabledState."
-            Write-LogHost "  Registry reverted: Disabled = $originalDisabledState" -Color Green
-        }
-    } else {
-        # Value was absent before install — remove it entirely rather than writing 0
-        if ($PSCmdlet.ShouldProcess($cpKeyPath, 'Remove Disabled value (was absent before install)')) {
-            try {
-                Remove-ItemProperty -Path $cpKeyPath -Name 'Disabled' -ErrorAction SilentlyContinue
-                Write-Log "Removed 'Disabled' value (restoring to original absent state)."
-                Write-LogHost "  Registry reverted: Disabled value removed (was originally absent)." -Color Green
-            } catch {
-                Write-Log "Could not remove 'Disabled' value: $_" -Level WARN
-                Write-LogHost "  WARNING: Could not remove 'Disabled' value. Remove manually from: $cpKeyPath" -Level WARN -Color Yellow
-            }
-        }
+    if ($PSCmdlet.ShouldProcess($cpKeyPath, 'Set Disabled = 0 (re-enable PasswordProvider)')) {
+        Set-ItemProperty -Path $cpKeyPath -Name 'Disabled' -Value 0 -Type DWord
+        Write-Log "Set 'Disabled' to 0 — PasswordProvider re-enabled."
+        Write-LogHost "  PasswordProvider re-enabled: Disabled = 0" -Color Green
     }
 } else {
-    Write-LogHost "Credential provider key not found at '$cpKeyPath' — skipping revert." -Level WARN -Color Yellow
+    Write-LogHost "Credential provider key not found at '$cpKeyPath' — skipping." -Level WARN -Color Yellow
+    Write-Log "Credential provider key not found at '$cpKeyPath' — skipping revert." -Level WARN
 }
 #endregion
 
 #region ── Remove Metadata Registry Key ──────────────────────────────────────────
-Write-LogHost "Removing HKLM:\SOFTWARE\uacbio metadata key ..." -Color Cyan
+Write-LogHost 'Removing hellosudo metadata registry keys...' -Color Cyan
 
-if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Remove metadata registry key')) {
-    try {
-        Remove-Item -Path $Script:MetaKey -Recurse -Force
-        Write-Log "Metadata key removed."
-        Write-LogHost "  Metadata key removed." -Color Green
-    } catch {
-        Write-Log "Failed to remove metadata key: $_" -Level WARN
-        Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $($Script:MetaKey)" -Level WARN -Color Yellow
+foreach ($keyToRemove in @($Script:MetaKey, $Script:LegacyMetaKey)) {
+    if (Test-Path $keyToRemove) {
+        if ($PSCmdlet.ShouldProcess($keyToRemove, 'Remove metadata registry key')) {
+            try {
+                Remove-Item -Path $keyToRemove -Recurse -Force
+                Write-Log "Removed metadata key: $keyToRemove"
+                Write-LogHost "  Metadata key removed: $keyToRemove" -Color Green
+            } catch {
+                Write-Log "Failed to remove key ${keyToRemove}: $_" -Level WARN
+                Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $keyToRemove" -Level WARN -Color Yellow
+            }
+        }
     }
 }
 #endregion
 
 #region ── Remove Data Directory (if empty) ──────────────────────────────────────
-Write-LogHost "Checking if C:\ProgramData\uacbio can be removed ..." -Color Cyan
+Write-LogHost 'Checking data directories for cleanup...' -Color Cyan
+Write-Log "Uninstallation complete. Checking data directories for cleanup."
 
-Write-Log "Uninstallation complete. Checking data directory for cleanup."
-
-$remaining = Get-ChildItem -Path $Script:DataDir -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -ne $Script:LogFile }
-
-if ($null -eq $remaining -or $remaining.Count -eq 0) {
-    if ($PSCmdlet.ShouldProcess($Script:DataDir, 'Remove data directory')) {
-        try {
-            Remove-Item -Path $Script:DataDir -Recurse -Force
-            Write-Host "  Data directory removed: $($Script:DataDir)" -ForegroundColor Green
-        } catch {
-            Write-Host "  WARNING: Could not fully remove data directory. Remove manually: $($Script:DataDir)" -ForegroundColor Yellow
+foreach ($dir in @($Script:DataDir, $Script:LegacyDataDir)) {
+    if (Test-Path -LiteralPath $dir) {
+        $logFile  = Join-Path $dir 'logs\uninstall.log'
+        $remaining = @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $logFile })
+        if ($remaining.Count -eq 0) {
+            try {
+                Remove-Item -LiteralPath $dir -Recurse -Force
+                Write-Host "  Data directory removed: $dir" -ForegroundColor Green
+            } catch {
+                Write-Host "  WARNING: Could not remove: $dir" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  Data directory not empty — left in place: $dir" -ForegroundColor Yellow
         }
     }
-} else {
-    Write-Host "  Data directory not empty — left in place: $($Script:DataDir)" -ForegroundColor Yellow
-    Write-Host "  Remaining files:" -ForegroundColor Yellow
-    $remaining | ForEach-Object { Write-Host "    $($_.FullName)" -ForegroundColor Yellow }
 }
 #endregion
 
 #region ── Summary ───────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host ('=' * 60) -ForegroundColor Green
-Write-Host ' uacbio uninstallation complete.' -ForegroundColor Green
+Write-Host ' hellosudo uninstallation complete.' -ForegroundColor Green
 Write-Host ('=' * 60) -ForegroundColor Green
 #endregion

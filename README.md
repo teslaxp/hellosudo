@@ -1,278 +1,211 @@
-# uacbio
+# hellosudo
 
-> **Windows UAC Biometric Fix for Local Accounts**  
-> Dynamically toggles the `PasswordProvider` credential provider so that ConsentUI surfaces biometrics immediately — no "More choices" click required.
-
----
-
-## Table of Contents
-
-1. [Description](#description)
-2. [The Problem](#the-problem)
-3. [The Solution — State Matrix](#the-solution--state-matrix)
-4. [Safety Mechanisms](#safety-mechanisms)
-5. [Installation](#installation)
-6. [Uninstallation](#uninstallation)
-7. [Logging](#logging)
-8. [Known Limitations](#known-limitations)
-
----
-
-## Description
-
-**uacbio** is a lightweight Windows automation project that fixes a chronic usability issue with UAC (User Account Control) prompts on Windows 11 machines using **local accounts**.
-
-It works in two complementary layers:
-
-1. **UAC Policy (core, mandatory):** On installation, uacbio sets `ConsentPromptBehaviorAdmin = 1` and `PromptOnSecureDesktop = 1` in the Windows policy registry. This forces the Administrator UAC prompt to request an explicit credential — password *or* biometric — on the isolated Secure Desktop, rather than silently auto-elevating or showing a plain consent dialog. Original values are preserved in metadata and fully restored on uninstall.
-
-2. **PasswordProvider toggling:** uacbio dynamically writes a single `Disabled` DWORD under the `PasswordProvider` credential provider GUID at precisely the right moments using Windows Task Scheduler triggers and optional Group Policy scripts. When the provider is disabled, ConsentUI falls through to the next available provider — Windows Hello biometrics — so fingerprint or face recognition appears immediately at the UAC prompt.
-
-Both layers operate exclusively through native Windows registry keys and built-in scheduling mechanisms. No third-party software, no drivers, no kernel patches — and **no dependency on Group Policy infrastructure**, making the solution work flawlessly on both Windows Home and Pro editions.
+**Biometric-first elevation for Windows 11 local accounts.**
 
 ---
 
 ## The Problem
 
-### Microsoft Accounts vs. Local Accounts in ConsentUI
+On Windows 11 with a local account, UAC prompts show a password field by default. Windows Hello biometrics and PIN are hidden behind a "More choices" link — an extra friction point that breaks the fast-elevation workflow that Microsoft Account users get out of the box.
 
-When a UAC elevation prompt appears (`ConsentUI.exe`), Windows enumerates all registered credential providers to build the list of sign-in options. The behavior differs critically between account types:
+**Before hellosudo:**
+```
+UAC prompt → Password field → More choices → Fingerprint / PIN
+```
 
-| Account Type      | Biometrics at UAC prompt |
-|-------------------|--------------------------|
-| Microsoft Account | ✅ Shown immediately     |
-| Local Account     | ❌ Hidden behind **"More choices"** |
-
-The root cause is the **PasswordProvider** credential provider (`{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}`). When it is active (i.e. its `Disabled` DWORD is `0` or absent), ConsentUI selects it as the *default* provider for local accounts and renders a password field first — pushing Windows Hello / biometrics to a secondary "More choices" menu.
-
-**Disabling** this provider (setting `Disabled = 1`) causes ConsentUI to fall through to the next available credential provider — which, if Windows Hello is configured, is the biometric provider. This makes fingerprint / face recognition appear immediately on the UAC prompt.
-
-The challenge is that this registry value must be managed dynamically: disabled during an active session (so UAC uses biometrics) and restored at session boundaries (to keep the standard login flow intact for next sign-in).
+**After hellosudo:**
+```
+UAC prompt → Fingerprint / PIN immediately
+```
 
 ---
 
-## The Solution — State Matrix
+## How It Works
 
-uacbio operates in two complementary layers that together guarantee biometrics appear immediately at every UAC prompt.
+hellosudo configures two things:
 
-### Layer 1 — UAC Policy (applied once at install, works on Home & Pro)
+**1. UAC credential policy (core — mandatory)**
 
-| Registry Value | Key | Set To | Effect |
-|---|---|---|---|
-| `ConsentPromptBehaviorAdmin` | `...\Policies\System` | `1` | Forces credential/biometric prompt for Admins (instead of silent consent) |
-| `PromptOnSecureDesktop` | `...\Policies\System` | `1` | Ensures the prompt runs on the isolated Secure Desktop |
+Sets the Administrator consent prompt to require explicit credentials rather than a one-click consent:
 
-These two values are the prerequisite that makes biometrics available at the UAC prompt. They target native system registry keys directly, bypassing Group Policy infrastructure entirely, so they work identically on **Windows Home** and **Windows Pro**.
+| Registry value | Set to | Effect |
+|---|---|---|
+| `ConsentPromptBehaviorAdmin` | `1` | Credential prompt (enables biometric flow) |
+| `PromptOnSecureDesktop` | `1` | Enforces the isolated Secure Desktop |
 
-### Layer 2 — PasswordProvider Dynamic Toggling (via Task Scheduler + optional GPO)
+Both values are backed up during install and fully restored on uninstall.
 
-uacbio registers Scheduled Tasks and optional Group Policy scripts to toggle the `Disabled` value at each system state transition:
+This is the key unlock: when Windows prompts for credentials on the Secure Desktop, Windows Hello biometrics and PIN become the primary authentication options.
 
-| System Event          | Action                    | Mechanism             |
-|-----------------------|---------------------------|-----------------------|
-| **Install**           | Set `ConsentPromptBehaviorAdmin=1`, `PromptOnSecureDesktop=1` | Registry (core) |
-| **Logon**             | Set `Disabled = 1`        | Task Scheduler        |
-| **Workstation Unlock**| Set `Disabled = 1`        | Task Scheduler        |
-| **Workstation Lock**  | Set `Disabled = 0`        | Task Scheduler        |
-| **Logoff** (Event 7002)| Set `Disabled = 0`       | Task Scheduler        |
-| **Startup**           | Set `Disabled = 0`        | Task Scheduler        |
-| **Shutdown** (GPO)    | Set `Disabled = 0`        | Group Policy Script   |
-| **Startup** (GPO)     | Set `Disabled = 0`        | Group Policy Script   |
-| **Uninstall**         | Restore `ConsentPromptBehaviorAdmin` + `PromptOnSecureDesktop` to originals | Registry |
+**2. PasswordProvider state machine (dynamic)**
 
-> Both scheduled tasks run under the **SYSTEM** account with **HighestAvailable** privileges, ensuring they execute regardless of which user is active.
+The PasswordProvider (`{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}`) is the credential tile that shows a password field in ConsentUI. When it is present, it appears before biometric options. When its `Disabled` DWORD is set to `1`, it is hidden — and Windows Hello / PIN surfaces immediately.
 
-The two registered tasks are:
+hellosudo installs Task Scheduler jobs that toggle this value based on session state:
 
-| Task Name                    | Sets `Disabled` | Default Triggers          |
-|------------------------------|-----------------|---------------------------|
-| `uacbio_Disable_Password`    | `1` (disable)   | Logon, Workstation Unlock |
-| `uacbio_Restore_Password`    | `0` (restore)   | Startup, Lock, Logoff     |
+| Event | PasswordProvider | Reason |
+|---|---|---|
+| Logon / Unlock | `Disabled = 1` | Suppress password tile, surface biometrics |
+| Lock / Logoff / Startup | `Disabled = 0` | Restore for standard flows |
+
+This works on **both Windows Home and Pro** because it targets native registry keys directly, not Group Policy infrastructure.
 
 ---
 
-## Safety Mechanisms
+## Quick Install
 
-### Windows Hello / NGC Pre-flight Check
+```powershell
+# Run from an elevated PowerShell, or let the installer self-elevate:
+.\install.ps1
 
-> **This check exists to prevent a catastrophic lockout.** If the `PasswordProvider` is disabled and no alternative credential provider is available, ConsentUI will have zero sign-in options — making it impossible to approve any UAC elevation prompt.
+# Silent install with all defaults:
+.\install.ps1 -Silent
 
-Before making any system changes, uacbio verifies that at least one **Windows Hello PIN or Biometric** credential is enrolled on the machine by checking for subkeys under:
+# Silent install, enable sudo in a new window:
+.\install.ps1 -Silent -SudoMode forceNewWindow
+
+# Skip sudo configuration:
+.\install.ps1 -Silent -EnableSudo:$false
+```
+
+---
+
+## Features
+
+- **Biometric-first UAC** — Windows Hello PIN and fingerprint appear first, every time
+- **Local account support** — works without a Microsoft Account
+- **Windows sudo integration** — enables and configures Windows 11's built-in `sudo` command
+- **State machine automation** — Task Scheduler precisely controls provider state across logon, logoff, lock, unlock, and startup
+- **GPO coverage** — optional Group Policy shutdown/startup scripts for belt-and-suspenders coverage (Pro/Enterprise)
+- **Full reversibility** — all original values are backed up and restored exactly on uninstall
+- **Pre-flight safety check** — blocks install if no Windows Hello / PIN credential is detected
+- **Helper command** — `hellosudo.cmd` for manual control and status inspection
+
+---
+
+## Safety Model
+
+### Pre-flight Windows Hello Check
+
+Before installing, hellosudo checks for the presence of NGC (Windows Hello PIN) credentials at:
 
 ```
 HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin\Credentials
 ```
 
-If this key has no children, no PIN or biometric is configured.
+If no credentials are found and `-IgnoreHelloCheck` is not specified:
 
-**Behaviour when no credential is detected:**
+- **Interactive mode**: A red warning is displayed and you must type `PROCEED` to continue.
+- **Silent mode**: The installer throws a terminating error.
 
-| Mode | Behaviour |
+**Why this matters**: Suppressing the PasswordProvider without an active Windows Hello / PIN credential would leave ConsentUI with no available sign-in option, making all UAC elevations impossible.
+
+### Metadata Backup
+
+All original values are written to `HKLM:\SOFTWARE\hellosudo` before any changes are applied:
+
+| Metadata key | Description |
 |---|---|
-| **Interactive** (default) | Displays a large red warning and requires the user to type `PROCEED` to continue. Any other input aborts the installation safely. |
-| **Silent** (`-Silent`) | Throws a hard terminating error with a clear explanation and exits. No system changes are made. |
+| `TargetGUID` | The credential provider GUID being managed |
+| `OriginalDisabledExisted` | Whether the `Disabled` value existed pre-install |
+| `OriginalDisabledState` | The original value of `Disabled` |
+| `OriginalConsentBehavior` | Pre-install `ConsentPromptBehaviorAdmin` |
+| `OriginalSecureDesktop` | Pre-install `PromptOnSecureDesktop` |
+| `InstalledTasks` | Which task triggers were registered |
+| `InstalledGPScripts` | Which GPO script phases were configured |
 
-In both cases the log file records the outcome.
+### Logs
 
-**Bypassing the check (`-IgnoreHelloCheck`):**
-
-If you are deploying to a machine where a credential provider is available but not detectable via the NGC key (e.g., a third-party smart-card provider), you can bypass the guard:
-
-```powershell
-.\install.ps1 -IgnoreHelloCheck
-.\install.ps1 -Silent -IgnoreHelloCheck
-```
-
-> ⚠️ **Do not use `-IgnoreHelloCheck` unless you are absolutely certain an alternative credential provider will be available in ConsentUI.** You can verify this by opening an elevated prompt manually before running the installer.
+| Script | Log location |
+|---|---|
+| install.ps1 | `C:\ProgramData\hellosudo\logs\install.log` |
+| uninstall.ps1 | `C:\ProgramData\hellosudo\logs\uninstall.log` |
 
 ---
 
-## Installation
+## Windows sudo Integration
 
-### Prerequisites
-
-- Windows 11 (or Windows 10 with Windows Hello configured)
-- PowerShell 5.1 or later (or PowerShell 7+)
-- Administrator privileges (the script auto-elevates if needed)
-
-### Quick Start
+hellosudo enables Windows 11's built-in `sudo` command by default during installation.
 
 ```powershell
-# Interactive install — presents a Review & Confirm menu
-.\install.ps1
-
-# Silent install with all defaults
+# Default: enable sudo in inline (normal) mode
 .\install.ps1 -Silent
 
-# Custom: only register Logon + Unlock triggers, add GPO Shutdown script, silent
-.\install.ps1 -Silent -Tasks Logon,Unlock -GPScripts Shutdown
+# Enable sudo in new-window mode
+.\install.ps1 -Silent -SudoMode forceNewWindow
+
+# Skip sudo configuration
+.\install.ps1 -Silent -EnableSudo:$false
 ```
 
-### Parameters
+`SudoMode` values:
 
-All parameters support **tab-completion** in PowerShell (via `ValidateSet`) — press <kbd>Tab</kbd> after the parameter name to cycle through valid values.
+| Value | Registry | Behavior |
+|---|---|---|
+| `normal` | `3` | Inline elevation — inherits the current window |
+| `forceNewWindow` | `1` | Always opens a new elevated window |
+| `disableInput` | `2` | Elevated process runs without interactive input |
+
+After install, `sudo` works natively:
+
+```cmd
+sudo powershell
+sudo regedit
+sudo "net localgroup Administrators"
+```
+
+Or use the helper:
+```cmd
+hellosudo sudo powershell
+hellosudo sudo regedit
+```
+
+**Requirements**: Windows 11 24H2 or later. If `sudo.exe` is not present, hellosudo logs a warning and continues installation without configuring sudo.
 
 ---
 
-#### `-Tasks`
+## hellosudo.cmd Helper
 
-**Type:** `string[]`  
-**Default:** `@('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')`  
-**Valid values:** `Lock`, `Unlock`, `Logon`, `Logoff`, `Startup`
+`hellosudo.cmd` provides manual control and status inspection from any command prompt.
 
-Selects which system state transitions to register as Scheduled Task triggers.
-
-```powershell
-# Minimal: only fix UAC during active session (Logon + Unlock triggers)
-.\install.ps1 -Tasks Logon,Unlock -Silent
-
-# Tab-completion example (type and press Tab):
-.\install.ps1 -Tasks Lo<Tab>   # cycles: Lock → Logon → Logoff
+```cmd
+hellosudo status              — Show full system state
+hellosudo on                  — Manually enable biometric-first mode
+hellosudo off                 — Manually restore standard mode
+hellosudo sudo <command>      — Run via Windows sudo
 ```
 
-> **Autocomplete note:** Because `-Tasks` is declared with `[ValidateSet(...)]`, PowerShell's tab-completion engine automatically offers `Lock`, `Unlock`, `Logon`, `Logoff`, and `Startup` as completions — no extra configuration required.
+Examples:
+
+```cmd
+hellosudo status
+hellosudo sudo powershell
+hellosudo sudo "reg query HKLM\SOFTWARE\hellosudo"
+```
+
+`hellosudo on` and `hellosudo off` request Administrator elevation automatically.
 
 ---
 
-#### `-GPScripts`
+## Parameters
 
-**Type:** `string[]`  
-**Default:** `@('Shutdown')`  
-**Valid values:** `Startup`, `Shutdown`
+### install.ps1
 
-Configures Group Policy Machine Scripts (`scripts.ini`) as an additional safety net to ensure `Disabled` is reset even if the Task Scheduler is bypassed (e.g., forced power-off).
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Silent` | switch | `$false` | Skip the interactive Review & Confirm menu |
+| `-EnableSudo` | switch | `$true` | Enable Windows sudo during installation |
+| `-SudoMode` | string | `normal` | Sudo mode: `normal`, `forceNewWindow`, `disableInput` |
+| `-Tasks` | string[] | `Lock,Unlock,Logon,Logoff,Startup` | Task Scheduler trigger events |
+| `-GPScripts` | string[] | `Shutdown` | GPO script phases (silently skipped on Home editions) |
+| `-PasswordProviderGUID` | string | `{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}` | Credential provider GUID |
+| `-IgnoreHelloCheck` | switch | `$false` | Bypass the Windows Hello pre-flight check |
 
-```powershell
-# Add both Shutdown and Startup GP scripts
-.\install.ps1 -GPScripts Startup,Shutdown -Silent
-
-# Disable GPO scripts entirely
-.\install.ps1 -GPScripts @() -Silent
-```
-
-> **Windows Home note:** Local Group Policy is not available on Windows Home editions. If a Home edition is detected, GPO script configuration is **silently skipped** — no error is raised and all Task Scheduler features still work normally.
+All parameters support PowerShell tab-completion. `-Tasks` and `-GPScripts` accept any combination from their respective `ValidateSet` lists.
 
 ---
 
-#### `-PasswordProviderGUID`
-
-**Type:** `string`  
-**Default:** `{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}`
-
-The registry GUID of the `PasswordProvider` credential provider. Must include surrounding braces. You should not need to change this unless Microsoft ships a different provider GUID in a future Windows update.
-
-```powershell
-.\install.ps1 -PasswordProviderGUID '{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}'
-```
-
----
-
-#### `-Silent`
-
-**Type:** `switch`  
-**Default:** not set (interactive mode)
-
-Suppresses the interactive Review & Confirm menu and proceeds immediately with the current parameter values. Useful for scripted deployments.
-
-```powershell
-.\install.ps1 -Silent
-```
-
----
-
-#### `-IgnoreHelloCheck`
-
-**Type:** `switch`  
-**Default:** not set (check enforced)
-
-Bypasses the Windows Hello / NGC pre-flight safety check. See [Safety Mechanisms](#safety-mechanisms) for full details.
-
-> ⚠️ **Only use this switch if you are certain an alternative credential provider (PIN, biometrics, smart card) will be available in ConsentUI.** Using it on a machine with no configured alternative will lock out all UAC elevations.
-
-```powershell
-# Silent deployment on a machine with a non-NGC credential provider
-.\install.ps1 -Silent -IgnoreHelloCheck
-```
-
----
-
-### Interactive Mode
-
-When `-Silent` is **not** specified, the installer presents a Review & Confirm menu:
-
-```
-╔══════════════════════════════════════════════════════════╗
-║          uacbio  ·  Review & Confirm Installation        ║
-╠══════════════════════════════════════════════════════════╣
-║  Provider GUID : {60b78e88-ead8-445c-9cfd-0b87f74ea6cd} ║
-║  Tasks         : Lock, Unlock, Logon, Logoff, Startup    ║
-║  GPO Scripts   : Shutdown                                 ║
-╠══════════════════════════════════════════════════════════╣
-║  [C] Continue with these settings                         ║
-║  [T] Change Tasks selection                               ║
-║  [G] Change GPO Scripts selection                         ║
-║  [Q] Quit                                                 ║
-╚══════════════════════════════════════════════════════════╝
-```
-
-The displayed values always reflect the *current* parameter values — whether those are the script defaults or values you passed on the command line. You can adjust Tasks and GPO Scripts interactively before confirming.
-
----
-
-### What Gets Installed
-
-| Component | Location |
-|---|---|
-| UAC policy (core) | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` |
-| Scheduled Task (disable) | `\uacbio_Disable_Password` in Task Scheduler |
-| Scheduled Task (restore) | `\uacbio_Restore_Password` in Task Scheduler |
-| GPO scripts file | `C:\Windows\System32\GroupPolicy\Machine\Scripts\scripts.ini` |
-| Metadata registry key | `HKLM\SOFTWARE\uacbio` |
-| Log file | `C:\ProgramData\uacbio\logs\install.log` |
-
----
-
-## Uninstallation
+## Uninstall
 
 ```powershell
 .\uninstall.ps1
@@ -280,71 +213,80 @@ The displayed values always reflect the *current* parameter values — whether t
 
 The uninstaller:
 
-1. Reads metadata from `HKLM\SOFTWARE\uacbio`
-2. Removes both scheduled tasks (`uacbio_Disable_Password`, `uacbio_Restore_Password`)
-3. Removes uacbio blocks from `scripts.ini` (`[Startup]` and/or `[Shutdown]` sections, if present), then runs `gpupdate /force`
-4. **Reverts `ConsentPromptBehaviorAdmin` and `PromptOnSecureDesktop`** to their original pre-install values (stored in metadata)
-5. Reverts the `PasswordProvider` `Disabled` value to its **original state** (as captured during install)
-6. Deletes the `HKLM\SOFTWARE\uacbio` metadata key
-7. Removes `C:\ProgramData\uacbio` if it is empty
-
-> If the metadata key is missing (e.g., uacbio was never installed), the uninstaller logs an error and exits without making any changes.
-
----
-
-## Logging
-
-Both scripts write detailed timestamped logs:
-
-| Script | Log file |
-|---|---|
-| `install.ps1` | `C:\ProgramData\uacbio\logs\install.log` |
-| `uninstall.ps1` | `C:\ProgramData\uacbio\logs\uninstall.log` |
-
-Log entries include the timestamp, severity level (`INFO`, `WARN`, `ERROR`), and a descriptive message for every registry read/write, task registration, GPO modification, and elevation attempt.
-
-Example log lines:
-```
-[2025-06-01 14:32:10] [INFO] OS detected   : Windows 11 Pro
-[2025-06-01 14:32:10] [INFO] Current 'Disabled' value: 0
-[2025-06-01 14:32:11] [INFO] Registered task: uacbio_Disable_Password
-[2025-06-01 14:32:11] [INFO] Updated GPO ini '...scripts.ini' — added [Shutdown] block at index 0.
-```
+1. Reads metadata from `HKLM:\SOFTWARE\hellosudo` (falls back to `HKLM:\SOFTWARE\uacbio` for legacy installs)
+2. Removes both scheduled tasks from the `\hellosudo\` Task Scheduler folder
+3. Removes hellosudo blocks from `scripts.ini` (handles both `# hellosudo` and `# uacbio` markers)
+4. Runs `gpupdate /force` if GPO scripts were configured
+5. Restores `ConsentPromptBehaviorAdmin` and `PromptOnSecureDesktop` to their pre-install values
+6. Sets `PasswordProvider Disabled = 0` (re-enables the provider unconditionally)
+7. Removes the `HKLM:\SOFTWARE\hellosudo` metadata key
+8. Removes `C:\ProgramData\hellosudo` if empty
 
 ---
 
 ## Known Limitations
 
-### "Run as different user" GUI Block
+### "Run as different user" in File Explorer
 
-The UAC "Run as different user" dialog (`ConsentUI` in `runasdifferentuser` mode) is **not affected** by this fix. When you right-click → *Run as different user*, Windows always presents a full credential prompt that is not filtered by the `PasswordProvider` `Disabled` flag — the dialog hard-codes the password credential UI regardless of provider state.
+When using **right-click → Run as different user** in Windows Explorer, the UAC prompt opens a CredUI window (not ConsentUI) that shows only the username/password fields. This flow does not respect the PasswordProvider state managed by hellosudo.
 
-**Workaround using `runas /user:` from the command line:**
-
-The `runas` command-line utility respects the credential provider state. You can use it as a functional equivalent:
-
+**CLI workaround**:
 ```cmd
-runas /user:DOMAIN\AdminUser "notepad.exe"
+runas /user:DOMAIN\adminuser "notepad.exe"
 ```
 
-Or with the local machine name:
+### Map Network Drive credentials
 
+The network credential dialog (`net use` and the GUI map drive wizard) uses a separate credential flow unaffected by hellosudo.
+
+**CLI workaround**:
 ```cmd
-runas /user:COMPUTERNAME\Administrator "C:\path\to\app.exe"
+net use \\server\share /user:domain\user
 ```
 
-After running this command, Windows will prompt for a password in the terminal. This flow **does** benefit from uacbio: if you have Windows Hello PIN set up for the target account, some elevation flows will offer it.
+### Legacy CredUI flows
 
-> **Tip:** You can combine `runas` with `cmd /c start ""` to launch GUI applications in a new window under a different identity while keeping your current terminal session intact.
+Some older applications invoke `CredUIPromptForCredentials` directly, which bypasses ConsentUI entirely. hellosudo has no effect on these dialogs.
 
-### Scope
+### Windows Hello must be configured first
 
-- uacbio targets the **currently logged-in local account** session. It has no effect on domain-joined machines where interactive UAC prompts are handled by domain credential providers.
-- Windows Hello / biometrics must already be configured on the machine for the fix to have a visible effect.
-- The `PasswordProvider` GUID (`{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}`) is correct for all currently known Windows 11 builds. If Microsoft changes this GUID in a future update, pass the new GUID via the `-PasswordProviderGUID` parameter.
+hellosudo suppresses the PasswordProvider. If Windows Hello PIN or biometrics are not set up on the machine, this will leave ConsentUI with no available credential tile.
+
+Set up Windows Hello before installing:
+**Settings → Accounts → Sign-in options → Windows Hello PIN**
 
 ---
 
-## License
+## Technical Reference
 
-MIT
+### State Matrix
+
+| System Event | Task | PasswordProvider | Purpose |
+|---|---|---|---|
+| Logon | `hellosudo_Disable_Password` | `Disabled=1` | Biometric-first on login |
+| Workstation Unlock | `hellosudo_Disable_Password` | `Disabled=1` | Biometric-first on unlock |
+| Startup (boot) | `hellosudo_Restore_Password` | `Disabled=0` | Restore for boot flows |
+| Workstation Lock | `hellosudo_Restore_Password` | `Disabled=0` | Restore on lock |
+| Logoff (Event 7002) | `hellosudo_Restore_Password` | `Disabled=0` | Restore on session end |
+| GPO Shutdown script | `scripts.ini [Shutdown]` | `Disabled=0` | Restore via Group Policy |
+| GPO Startup script | `scripts.ini [Startup]` | `Disabled=0` | Restore via Group Policy |
+
+### Registry Paths
+
+| Path | Value | Purpose |
+|---|---|---|
+| `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}` | `Disabled` DWORD | Toggles PasswordProvider visibility in ConsentUI |
+| `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | `ConsentPromptBehaviorAdmin` DWORD | Sets UAC prompt type for Administrators |
+| `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | `PromptOnSecureDesktop` DWORD | Enforces Secure Desktop isolation |
+| `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo` | `Enabled` DWORD | Windows sudo mode (0=off, 1=new window, 2=input disabled, 3=normal) |
+| `HKLM\SOFTWARE\hellosudo` | Various | Installation metadata and original value backups |
+
+### GPO scripts.ini
+
+When GPO script configuration is enabled, hellosudo appends to:
+```
+C:\Windows\System32\GroupPolicy\Machine\Scripts\scripts.ini
+```
+
+Entries are marked with `# hellosudo` and can be inspected or removed manually. The uninstaller removes all marked entries and can handle legacy `# uacbio` markers from prior installations.
+

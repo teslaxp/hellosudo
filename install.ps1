@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs uacbio — a Windows UAC biometric fix for local accounts.
+    Installs hellosudo — biometric-first UAC for Windows 11 local accounts.
 
 .DESCRIPTION
     Dynamically toggles the 'Disabled' DWORD of the PasswordProvider credential
@@ -18,8 +18,18 @@
     Automation is achieved through Windows Task Scheduler triggers (Logon, Logoff,
     Lock, Unlock, Startup) and optional Group Policy startup/shutdown scripts.
 
+    Optionally enables the Windows 11 built-in sudo command.
+
 .PARAMETER Silent
     Skip the interactive Review & Confirm menu.
+
+.PARAMETER EnableSudo
+    Enable Windows sudo during installation. Requires Windows 11 24H2 or later.
+    If sudo.exe is not found, a warning is logged and installation continues.
+
+.PARAMETER SudoMode
+    Sudo mode to configure. Valid values: normal, forceNewWindow, disableInput.
+    Only used when -EnableSudo is $true.
 
 .PARAMETER Tasks
     Which state-machine events to register as Scheduled Task triggers.
@@ -53,12 +63,25 @@
 .EXAMPLE
     .\install.ps1 -Silent -IgnoreHelloCheck
     Silent install bypassing the Windows Hello pre-flight check.
+
+.EXAMPLE
+    .\install.ps1 -Silent -SudoMode forceNewWindow
+    Silent install enabling sudo in new-window mode.
+
+.EXAMPLE
+    .\install.ps1 -Silent -EnableSudo:$false
+    Silent install without configuring Windows sudo.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Silent,
 
     [switch]$IgnoreHelloCheck,
+
+    [switch]$EnableSudo = $true,
+
+    [ValidateSet('normal', 'forceNewWindow', 'disableInput')]
+    [string]$SudoMode = 'normal',
 
     [ValidateSet('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')]
     [string[]]$Tasks = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup'),
@@ -74,14 +97,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:LogDir      = 'C:\ProgramData\uacbio\logs'
+$Script:LogDir      = 'C:\ProgramData\hellosudo\logs'
 $Script:LogFile     = Join-Path $Script:LogDir 'install.log'
-$Script:MetaKey     = 'HKLM:\SOFTWARE\uacbio'
+$Script:MetaKey     = 'HKLM:\SOFTWARE\hellosudo'
 $Script:CPKey       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
 $Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-$Script:TaskPath    = '\uacbio\'
-$Script:TaskDisable = 'uacbio_Disable_Password'
-$Script:TaskRestore = 'uacbio_Restore_Password'
+$Script:TaskPath    = '\hellosudo\'
+$Script:TaskDisable = 'hellosudo_Disable_Password'
+$Script:TaskRestore = 'hellosudo_Restore_Password'
 $Script:RegExe      = "$env:SystemRoot\System32\reg.exe"
 $Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
 #endregion
@@ -170,7 +193,7 @@ if (-not (Test-IsAdmin)) { Invoke-SelfElevate }
 
 #region ── Log Banner ────────────────────────────────────────────────────────────
 Write-LogHost ('=' * 60) -Color Cyan
-Write-LogHost ' uacbio  —  Installation Script' -Color Cyan
+Write-LogHost ' hellosudo  —  Biometric-First UAC Installer' -Color Cyan
 Write-LogHost ('=' * 60) -Color Cyan
 Write-Log "Script path   : $($MyInvocation.PSCommandPath)"
 Write-Log "PowerShell    : $($PSVersionTable.PSVersion)"
@@ -179,6 +202,8 @@ Write-Log "GPScripts     : $($GPScripts -join ', ')"
 Write-Log "ProviderGUID  : $PasswordProviderGUID"
 Write-Log "Silent        : $Silent"
 Write-Log "IgnoreHello   : $IgnoreHelloCheck"
+Write-Log "EnableSudo    : $EnableSudo"
+Write-Log "SudoMode      : $SudoMode"
 #endregion
 
 #region ── OS Edition Guard ─────────────────────────────────────────────────────
@@ -238,7 +263,7 @@ if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
         Write-Host '' 
         Write-Host '  No Windows Hello PIN or Biometric credential was detected.' -ForegroundColor Red
         Write-Host '' 
-        Write-Host '  uacbio works by DISABLING the PasswordProvider credential' -ForegroundColor Yellow
+        Write-Host '  hellosudo works by DISABLING the PasswordProvider credential' -ForegroundColor Yellow
         Write-Host '  provider. If no alternative provider (PIN, fingerprint, face)' -ForegroundColor Yellow
         Write-Host '  is configured, ConsentUI will have ZERO available options.' -ForegroundColor Yellow
         Write-Host '  This will make it IMPOSSIBLE to approve UAC prompts.' -ForegroundColor Yellow
@@ -270,17 +295,20 @@ if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
 if (-not $Silent) {
     Write-Host ''
     Write-Host '╔══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
-    Write-Host '║          uacbio  ·  Review & Confirm Installation        ║' -ForegroundColor Cyan
+    Write-Host '║       hellosudo  ·  Review & Confirm Installation        ║' -ForegroundColor Cyan
     Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
     Write-Host "║  Provider GUID : $PasswordProviderGUID" -ForegroundColor White
     Write-Host "║  Tasks         : $($Tasks -join ', ')" -ForegroundColor White
     Write-Host "║  GPO Scripts   : $(if ($GPScripts.Count) { $GPScripts -join ', ' } else { '(none)' })" -ForegroundColor White
+    Write-Host "║  Enable Sudo   : $EnableSudo" -ForegroundColor White
+    Write-Host "║  Sudo Mode     : $SudoMode" -ForegroundColor White
     Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,           ║' -ForegroundColor White
     Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ║' -ForegroundColor White
     Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
     Write-Host '║  [C] Continue with these settings                        ║' -ForegroundColor Green
     Write-Host '║  [T] Change Tasks selection                               ║' -ForegroundColor Yellow
     Write-Host '║  [G] Change GPO Scripts selection                         ║' -ForegroundColor Yellow
+    Write-Host '║  [S] Change Sudo settings                                ║' -ForegroundColor Yellow
     Write-Host '║  [Q] Quit                                                 ║' -ForegroundColor Red
     Write-Host '╚══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host ''
@@ -319,7 +347,21 @@ if (-not $Silent) {
                     Write-Log "GPScripts updated interactively to: $($GPScripts -join ', ')"
                 }
             }
-            default { Write-Host 'Invalid choice, please enter C, T, G, or Q.' -ForegroundColor Red }
+            'S' {
+                $raw = Read-Host 'Enable Windows sudo during install? (yes/no)'
+                if ($raw.Trim().ToLower() -in @('yes','y')) { $EnableSudo = $true }
+                elseif ($raw.Trim().ToLower() -in @('no','n')) { $EnableSudo = $false }
+
+                if ($EnableSudo) {
+                    Write-Host 'Available modes: normal, forceNewWindow, disableInput' -ForegroundColor Cyan
+                    $modeInput = (Read-Host 'Sudo mode (or press Enter for normal)').Trim()
+                    if ($modeInput -in @('normal','forceNewWindow','disableInput')) {
+                        $SudoMode = $modeInput
+                    }
+                }
+                Write-Log "Sudo settings updated interactively: EnableSudo=$EnableSudo, SudoMode=$SudoMode"
+            }
+            default { Write-Host 'Invalid choice, please enter C, T, G, S, or Q.' -ForegroundColor Red }
         }
     }
 }
@@ -372,7 +414,7 @@ Write-Log "Current PromptOnSecureDesktop      : $originalSecureDesktop"
 #endregion
 
 #region ── Write Metadata ────────────────────────────────────────────────────────
-Write-LogHost 'Writing installation metadata to HKLM:\SOFTWARE\uacbio ...' -Color Cyan
+Write-LogHost 'Writing installation metadata to HKLM:\SOFTWARE\hellosudo ...' -Color Cyan
 
 if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Create/update metadata registry key')) {
     if (-not (Test-Path $Script:MetaKey)) {
@@ -431,10 +473,10 @@ function ConvertTo-XmlString { param([string]$s)
     $s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;' -replace "'","&apos;"
 }
 
-function New-UacbioTaskXml {
+function New-HellosudoTaskXml {
     <#
     .SYNOPSIS
-        Returns a Task Scheduler XML string for a uacbio task.
+        Returns a Task Scheduler XML string for a hellosudo task.
     .PARAMETER TriggerXml
         Array of pre-formed XML trigger element strings.
     .PARAMETER ActionArgs
@@ -484,7 +526,7 @@ $triggersBlock
 "@
 }
 
-function Register-UacbioTask {
+function Register-HellosudoTask {
     [CmdletBinding(SupportsShouldProcess)] param(
         [string]$TaskName,
         [string]$Xml
@@ -502,7 +544,7 @@ function Register-UacbioTask {
     }
 }
 
-# ── Task: uacbio_Disable_Password (Disabled=1) ──────────────────────────────
+# ── Task: hellosudo_Disable_Password (Disabled=1) ──────────────────────────────
 $disableTriggerXml = @()
 
 if ('Logon' -in $Tasks) {
@@ -516,14 +558,14 @@ if ('Unlock' -in $Tasks) {
 
 if ($disableTriggerXml.Count -gt 0) {
     $disableArgs = "ADD `"$($Script:CPKeyRaw)`" /v Disabled /t REG_DWORD /d 1 /f"
-    $disableXml  = New-UacbioTaskXml -TriggerXml $disableTriggerXml -ActionArgs $disableArgs `
-                       -Description 'uacbio: Disables PasswordProvider so biometrics appear first in UAC.'
-    Register-UacbioTask -TaskName $Script:TaskDisable -Xml $disableXml
+    $disableXml  = New-HellosudoTaskXml -TriggerXml $disableTriggerXml -ActionArgs $disableArgs `
+                       -Description 'hellosudo: Suppresses PasswordProvider on logon/unlock — biometrics and PIN surface first in UAC.'
+    Register-HellosudoTask -TaskName $Script:TaskDisable -Xml $disableXml
 } else {
     Write-Log "No triggers selected for '$($Script:TaskDisable)' — skipping registration."
 }
 
-# ── Task: uacbio_Restore_Password (Disabled=0) ──────────────────────────────
+# ── Task: hellosudo_Restore_Password (Disabled=0) ──────────────────────────────
 $restoreTriggerXml = @()
 
 if ('Startup' -in $Tasks) {
@@ -547,9 +589,9 @@ if ('Logoff' -in $Tasks) {
 
 if ($restoreTriggerXml.Count -gt 0) {
     $restoreArgs = "ADD `"$($Script:CPKeyRaw)`" /v Disabled /t REG_DWORD /d 0 /f"
-    $restoreXml  = New-UacbioTaskXml -TriggerXml $restoreTriggerXml -ActionArgs $restoreArgs `
-                       -Description 'uacbio: Restores PasswordProvider so the standard UAC flow is preserved outside elevated sessions.'
-    Register-UacbioTask -TaskName $Script:TaskRestore -Xml $restoreXml
+    $restoreXml  = New-HellosudoTaskXml -TriggerXml $restoreTriggerXml -ActionArgs $restoreArgs `
+                       -Description 'hellosudo: Restores PasswordProvider on startup/lock/logoff — preserves standard credential flow.'
+    Register-HellosudoTask -TaskName $Script:TaskRestore -Xml $restoreXml
 } else {
     Write-Log "No triggers selected for '$($Script:TaskRestore)' — skipping registration."
 }
@@ -559,88 +601,87 @@ if ($restoreTriggerXml.Count -gt 0) {
 function Update-GpoIni {
     <#
     .SYNOPSIS
-        Safely appends a uacbio block to a GPO scripts .ini file without
+        Safely appends a hellosudo block to the GPO scripts.ini file without
         corrupting existing third-party sections.
+    .NOTES
+        Internal helper — no SupportsShouldProcess. The calling code is responsible
+        for WhatIf/Confirm decisions. Removing CmdletBinding here eliminates the
+        $PSCmdlet.ShouldProcess() call that caused the script to hang waiting for
+        console input in non-interactive sudo sessions.
+        Uses ArrayList throughout for reliable .Count under Set-StrictMode -Version Latest.
+        Uses -LiteralPath to avoid wildcard expansion on bracket chars.
     #>
-    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$IniPath,
         [Parameter(Mandatory)][string]$Section,        # e.g. 'Shutdown'
         [Parameter(Mandatory)][int]   $DisabledValue
     )
 
-    $keyPath  = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
-    $cmdLine  = $Script:RegExe
-    $cmdArgs  = "ADD `"$keyPath`" /v Disabled /t REG_DWORD /d $DisabledValue /f"
+    $keyPath       = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+    $cmdLine       = $Script:RegExe
+    $cmdArgs       = "ADD `"$keyPath`" /v Disabled /t REG_DWORD /d $DisabledValue /f"
+    $marker        = '# hellosudo'
+    $sectionHeader = "[$Section]"
 
     $dir = Split-Path $IniPath -Parent
-    if (-not (Test-Path $dir)) {
-        if ($PSCmdlet.ShouldProcess($dir, 'Create GPO scripts directory')) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            Write-Log "Created GPO scripts directory: $dir"
-        }
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Write-Log "Created GPO scripts directory: $dir"
     }
 
-    # Read existing content (or start fresh); @() wrapping ensures array even when
-    # Get-Content returns $null (empty file) or a single string (one-line file).
-    $lines = if (Test-Path $IniPath) { @(Get-Content $IniPath -Encoding Unicode) } else { @() }
+    # Load file into an ArrayList — .Count is a native .NET property and is
+    # always available regardless of PS version or strict mode setting.
+    $lines = [System.Collections.ArrayList]::new()
+    if (Test-Path -LiteralPath $IniPath) {
+        foreach ($line in (Get-Content -LiteralPath $IniPath -Encoding Unicode)) {
+            [void]$lines.Add($line)
+        }
+    }
+    Write-Log "Update-GpoIni: loaded $($lines.Count) line(s) from '$IniPath' for section [$Section]"
 
-    # Check if uacbio block is already present (idempotency guard)
-    $marker = '# uacbio'
-    if ($lines -contains $marker) {
-        Write-Log "GPO ini '$IniPath' already contains uacbio block — skipping."
+    # Idempotency: skip if our marker already exists anywhere in the file
+    if ($lines.Contains($marker)) {
+        Write-Log "GPO ini '$IniPath' already contains hellosudo block — skipping."
         return
     }
 
-    # Locate the [Section] header; if missing, append it
-    $sectionHeader = "[$Section]"
-    $sectionLineNo = $null
+    # Locate the [Section] header; if missing, append it with a blank separator
+    $sectionIdx = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq $sectionHeader) { $sectionLineNo = $i; break }
+        if ($lines[$i] -eq $sectionHeader) { $sectionIdx = $i; break }
+    }
+    if ($sectionIdx -eq -1) {
+        [void]$lines.Add('')
+        [void]$lines.Add($sectionHeader)
+        $sectionIdx = $lines.Count - 1
     }
 
-    if ($null -eq $sectionLineNo) {
-        # Section absent — append blank separator and header
-        $lines       += ''
-        $lines       += $sectionHeader
-        $sectionLineNo = $lines.Count - 1   # 0-based index of the just-added header
-    }
-
-    # Determine the next available script index scoped to the target section only.
-    # Scanning globally across sections would contaminate numbering when multiple
-    # sections (e.g. [Startup] and [Shutdown]) both have entries.
+    # Determine next script index scoped to the target section only.
+    # Scanning globally would contaminate numbering when [Startup] and [Shutdown]
+    # both exist in the same scripts.ini file.
     $nextIdx = 0
-    for ($i = $sectionLineNo + 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\[') { break }   # hit next section header — stop
+    for ($i = $sectionIdx + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[') { break }            # hit next section — stop
         if ($lines[$i] -match '^(\d+)CmdLine=') {
             $candidate = [int]$Matches[1] + 1
             if ($candidate -gt $nextIdx) { $nextIdx = $candidate }
         }
     }
 
-    # Find insertion point: immediately after the last line of the target section
-    $insertAt = $sectionLineNo + 1
-    for ($i = $sectionLineNo + 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\[') { break }   # next section — stop before it
+    # Find insertion point: end of the target section (before the next section header)
+    $insertAt = $sectionIdx + 1
+    for ($i = $sectionIdx + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[') { break }
         $insertAt = $i + 1
     }
 
-    # Build lines to insert
-    $newLines = @(
-        "${nextIdx}CmdLine=$cmdLine",
-        "${nextIdx}Parameters=$cmdArgs",
-        $marker
-    )
+    # Insert the three new lines in order (Insert shifts existing items down)
+    [void]$lines.Insert($insertAt,     "${nextIdx}CmdLine=$cmdLine")
+    [void]$lines.Insert($insertAt + 1, "${nextIdx}Parameters=$cmdArgs")
+    [void]$lines.Insert($insertAt + 2, $marker)
 
-    # Splice into array — guard the lower bound to avoid $lines[0..-1] on empty files
-    $before = if ($insertAt -gt 0) { $lines[0..($insertAt - 1)] } else { @() }
-    $after  = if ($insertAt -lt $lines.Count) { $lines[$insertAt..($lines.Count - 1)] } else { @() }
-    $result = $before + $newLines + $after
-
-    if ($PSCmdlet.ShouldProcess($IniPath, "Write GPO [$Section] script configuration")) {
-        Set-Content -Path $IniPath -Value $result -Encoding Unicode
-        Write-Log "Updated GPO ini '$IniPath' — added [$Section] block at index $nextIdx."
-    }
+    Set-Content -LiteralPath $IniPath -Value $lines.ToArray() -Encoding Unicode
+    Write-Log "Updated GPO ini '$IniPath' — added [$Section] block at index $nextIdx."
 }
 
 $gpupdateNeeded = $false
@@ -671,10 +712,62 @@ if ($gpupdateNeeded) {
 }
 #endregion
 
+#region ── Windows Sudo Enablement ──────────────────────────────────────────────
+if ($EnableSudo) {
+    Write-LogHost 'Configuring Windows sudo...' -Color Cyan
+
+    $sudoExe = Get-Command sudo -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $sudoExe) {
+        Write-Log 'sudo.exe not found — Windows sudo requires Windows 11 24H2 or later.' -Level WARN
+        Write-LogHost '  WARNING: sudo.exe not found on this system.' -Level WARN -Color Yellow
+        Write-LogHost '  Windows sudo requires Windows 11 24H2+. Skipping sudo configuration.' -Color Yellow
+    } else {
+        try {
+            $sudoOut = & sudo config --enable $SudoMode 2>&1
+            Write-Log "sudo config --enable $SudoMode : $($sudoOut -join ' ')"
+            Write-LogHost "  Windows sudo enabled (mode: $SudoMode)." -Color Green
+
+            # Verify the registry confirms enablement
+            $sudoReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' `
+                           -Name 'Enabled' -ErrorAction SilentlyContinue
+            if ($null -ne $sudoReg -and [int]$sudoReg.Enabled -ge 1) {
+                Write-Log "Sudo registry confirmed enabled (Enabled=$($sudoReg.Enabled))."
+            } else {
+                Write-Log 'Sudo registry value not confirmed — sudo config may require a newer OS build.' -Level WARN
+            }
+        } catch {
+            Write-Log "sudo config failed: $_" -Level WARN
+            Write-LogHost '  WARNING: Could not configure Windows sudo.' -Level WARN -Color Yellow
+            Write-LogHost '  Installation will continue without sudo configuration.' -Color Yellow
+        }
+    }
+} else {
+    Write-Log "Windows sudo configuration skipped (-EnableSudo:$false)."
+    Write-LogHost '  Windows sudo configuration skipped.' -Color Yellow
+}
+#endregion
+
 #region ── Summary ───────────────────────────────────────────────────────────────
+$sudoStatus = if ($EnableSudo) {
+    $sr = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' `
+              -Name 'Enabled' -ErrorAction SilentlyContinue
+    if ($null -ne $sr -and [int]$sr.Enabled -ge 1) { "enabled ($SudoMode)" } else { 'configured (verify manually)' }
+} else { 'skipped' }
+
+Write-Host ''
+Write-Host (' ' * 2 + 'hellosudo installed successfully.') -ForegroundColor White
+Write-Host ''
+Write-Host ('  [OK] Biometric-first UAC (ConsentPromptBehaviorAdmin=1)') -ForegroundColor Green
+Write-Host ('  [OK] Secure Desktop enforced (PromptOnSecureDesktop=1)') -ForegroundColor Green
+Write-Host ("  [OK] Scheduled tasks registered in \hellosudo\") -ForegroundColor Green
+if ($GPScripts.Count -gt 0) {
+    Write-Host ("  [OK] GPO scripts configured ($($GPScripts -join ', '))") -ForegroundColor Green
+}
+Write-Host ("  [OK] Windows sudo $sudoStatus") -ForegroundColor Green
+Write-Host ('  [OK] Recovery metadata saved to HKLM:\SOFTWARE\hellosudo') -ForegroundColor Green
+Write-Host ("  [OK] Log: $($Script:LogFile)") -ForegroundColor Green
 Write-Host ''
 Write-LogHost ('=' * 60) -Color Green
-Write-LogHost ' uacbio installation complete!' -Color Green
-Write-LogHost "  Log file : $($Script:LogFile)" -Color Green
+Write-LogHost ' hellosudo installation complete.' -Color Green
 Write-LogHost ('=' * 60) -Color Green
 #endregion
