@@ -116,10 +116,13 @@ All original values are written to `HKLM:\SOFTWARE\hellosudo` before any changes
 
 ### Logs
 
-| Script | Log location |
-|---|---|
-| install.ps1 | `C:\ProgramData\hellosudo\logs\install.log` |
-| uninstall.ps1 | `C:\ProgramData\hellosudo\logs\uninstall.log` |
+All installation and uninstallation events are written to the **Windows Application Event Log**:
+
+```
+Event Viewer → Windows Logs → Application → Source: hellosudo
+```
+
+Event IDs: `1000` (Info), `1001` (Warning), `1002` (Error). The event source registration (`HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\hellosudo`) is created automatically on first run and removed by the uninstaller.
 
 ---
 
@@ -169,18 +172,9 @@ hellosudo sudo regedit
 `hellosudo.cmd` provides manual control and status inspection from any command prompt.
 
 ```cmd
-hellosudo status              — Show full system state
-hellosudo on                  — Manually enable biometric-first mode
-hellosudo off                 — Manually restore standard mode
-hellosudo sudo <command>      — Run via Windows sudo
-```
-
-Examples:
-
-```cmd
-hellosudo status
-hellosudo sudo powershell
-hellosudo sudo "reg query HKLM\SOFTWARE\hellosudo"
+hellosudo status    — Show full system state
+hellosudo on        — Manually enable biometric-first mode
+hellosudo off       — Manually restore standard mode
 ```
 
 `hellosudo on` and `hellosudo off` request Administrator elevation automatically.
@@ -213,46 +207,52 @@ All parameters support PowerShell tab-completion. `-Tasks` and `-GPScripts` acce
 
 The uninstaller:
 
-1. Reads metadata from `HKLM:\SOFTWARE\hellosudo` (falls back to `HKLM:\SOFTWARE\uacbio` for legacy installs)
+1. Reads metadata from `HKLM:\SOFTWARE\hellosudo`
 2. Removes both scheduled tasks from the `\hellosudo\` Task Scheduler folder
-3. Removes hellosudo blocks from `scripts.ini` (handles both `# hellosudo` and `# uacbio` markers)
+3. Removes hellosudo blocks from `scripts.ini`
 4. Runs `gpupdate /force` if GPO scripts were configured
 5. Restores `ConsentPromptBehaviorAdmin` and `PromptOnSecureDesktop` to their pre-install values
 6. Sets `PasswordProvider Disabled = 0` (re-enables the provider unconditionally)
 7. Removes the `HKLM:\SOFTWARE\hellosudo` metadata key
-8. Removes `C:\ProgramData\hellosudo` if empty
+8. Removes the `hellosudo` Windows Event Log source registration
 
 ---
 
 ## Known Limitations
 
-### "Run as different user" in File Explorer
+> **Important**: hellosudo suppresses the PasswordProvider credential tile system-wide. This intentionally breaks any Windows UI that relies on that tile to prompt for a **different user's password**. The two most common flows affected are described below.
 
-When using **right-click → Run as different user** in Windows Explorer, the UAC prompt opens a CredUI window (not ConsentUI) that shows only the username/password fields. This flow does not respect the PasswordProvider state managed by hellosudo.
+### "Run as different user" (File Explorer context menu)
 
-**CLI workaround**:
+Right-clicking a program and selecting **Run as different user** invokes a CredUI dialog that uses the PasswordProvider exclusively. With it suppressed, this dialog will either show no credential options or fail silently.
+
+**This workflow is broken while hellosudo is active.**
+
+Use the command-line equivalent instead:
 ```cmd
 runas /user:DOMAIN\adminuser "notepad.exe"
 ```
 
-### Map Network Drive credentials
+### Map Network Drive (GUI wizard)
 
-The network credential dialog (`net use` and the GUI map drive wizard) uses a separate credential flow unaffected by hellosudo.
+The "Map network drive" wizard in File Explorer uses a network credential dialog that also relies on the PasswordProvider to accept an alternative username and password. With the provider suppressed, entering credentials for a different account fails.
 
-**CLI workaround**:
+**This workflow is broken while hellosudo is active.**
+
+Use the command-line equivalent instead:
 ```cmd
-net use \\server\share /user:domain\user
+net use Z: \\server\share /user:DOMAIN\user
 ```
 
-### Legacy CredUI flows
+### Legacy CredUI applications
 
-Some older applications invoke `CredUIPromptForCredentials` directly, which bypasses ConsentUI entirely. hellosudo has no effect on these dialogs.
+Some applications call `CredUIPromptForCredentials` directly. These dialogs use the PasswordProvider and will be affected the same way as the flows above.
 
 ### Windows Hello must be configured first
 
-hellosudo suppresses the PasswordProvider. If Windows Hello PIN or biometrics are not set up on the machine, this will leave ConsentUI with no available credential tile.
+hellosudo suppresses the PasswordProvider. If no Windows Hello PIN or biometric is configured, ConsentUI will have no available credential tile — making UAC elevations impossible.
 
-Set up Windows Hello before installing:
+Configure Windows Hello before installing:
 **Settings → Accounts → Sign-in options → Windows Hello PIN**
 
 ---
@@ -288,5 +288,5 @@ When GPO script configuration is enabled, hellosudo appends to:
 C:\Windows\System32\GroupPolicy\Machine\Scripts\scripts.ini
 ```
 
-Entries are marked with `# hellosudo` and can be inspected or removed manually. The uninstaller removes all marked entries and can handle legacy `# uacbio` markers from prior installations.
+Entries are marked with `# hellosudo` and can be inspected or removed manually. The uninstaller removes all marked entries.
 

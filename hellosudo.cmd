@@ -2,13 +2,11 @@
 setlocal enabledelayedexpansion
 
 ::  hellosudo — biometric-first UAC helper
-::  https://github.com/yourusername/hellosudo
 ::
 ::  Usage:
 ::    hellosudo on              Enable biometric-first mode (Disabled=1)
 ::    hellosudo off             Restore standard UAC mode (Disabled=0)
 ::    hellosudo status          Show current system state
-::    hellosudo sudo <command>  Run command via Windows sudo
 ::
 ::  Requires Windows 11. Administrative elevation is requested as needed.
 
@@ -21,7 +19,6 @@ if "%~1"==""        goto :usage
 if /i "%~1"=="on"   goto :cmd_on
 if /i "%~1"=="off"  goto :cmd_off
 if /i "%~1"=="status" goto :cmd_status
-if /i "%~1"=="sudo" goto :cmd_sudo
 if /i "%~1"=="help" goto :usage
 if /i "%~1"=="/?"   goto :usage
 
@@ -107,34 +104,12 @@ reg query "HKLM\SOFTWARE\hellosudo" >nul 2>&1
 if not errorlevel 1 (
     echo   hellosudo install   : Active  ^(metadata found^)
 ) else (
-    reg query "HKLM\SOFTWARE\uacbio" >nul 2>&1
-    if not errorlevel 1 (
-        echo   hellosudo install   : Legacy uacbio install found
-    ) else (
-        echo   hellosudo install   : Not installed
-    )
+    echo   hellosudo install   : Not installed
 )
 
 echo   ─────────────────────────────────────────────────────
 echo.
 exit /b 0
-
-:: ─────────────────────────────────────────────────────────────────
-:cmd_sudo
-:: Wrapper around Windows sudo
-shift
-if "%~1"=="" (
-    echo   Usage: hellosudo sudo ^<command^> [args...]
-    exit /b 1
-)
-where sudo >nul 2>&1
-if errorlevel 1 (
-    echo   [ERROR] sudo.exe not found. Requires Windows 11 24H2 or later.
-    echo   Enable via: Settings ^> System ^> For developers ^> Enable sudo
-    exit /b 1
-)
-sudo %*
-exit /b %errorlevel%
 
 :: ─────────────────────────────────────────────────────────────────
 :require_admin
@@ -155,12 +130,10 @@ echo   Usage:
 echo     hellosudo on              Enable biometric-first UAC  ^(Disabled=1^)
 echo     hellosudo off             Restore standard UAC  ^(Disabled=0^)
 echo     hellosudo status          Show current system state
-echo     hellosudo sudo ^<command^>  Run command with Windows sudo
 echo.
 echo   Examples:
 echo     hellosudo status
 echo     hellosudo on
-echo     hellosudo sudo powershell
-echo     hellosudo sudo "reg query HKLM\SOFTWARE\hellosudo"
+echo     hellosudo off
 echo.
 exit /b 0

@@ -7,7 +7,6 @@
 .DESCRIPTION
     Reads installation metadata from HKLM:\SOFTWARE\hellosudo to discover what
     was installed, then cleanly reverses every change made by install.ps1.
-    Falls back to HKLM:\SOFTWARE\uacbio for legacy uacbio v1.x installs.
 
 .EXAMPLE
     .\uninstall.ps1
@@ -19,21 +18,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:LogDir      = 'C:\ProgramData\hellosudo\logs'
-$Script:LogFile     = Join-Path $Script:LogDir 'uninstall.log'
+$Script:EventSource = 'hellosudo'
 $Script:MetaKey     = 'HKLM:\SOFTWARE\hellosudo'
 $Script:TaskPath    = '\hellosudo\'
 $Script:TaskDisable = 'hellosudo_Disable_Password'
 $Script:TaskRestore = 'hellosudo_Restore_Password'
 $Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
-$Script:DataDir     = 'C:\ProgramData\hellosudo'
-
-# Legacy names from v1.x (uacbio) — checked during cleanup for backward compatibility
-$Script:LegacyMetaKey     = 'HKLM:\SOFTWARE\uacbio'
-$Script:LegacyTaskPath    = '\uacbio\'
-$Script:LegacyTaskDisable = 'uacbio_Disable_Password'
-$Script:LegacyTaskRestore = 'uacbio_Restore_Password'
-$Script:LegacyDataDir     = 'C:\ProgramData\uacbio'
 #endregion
 
 #region ── Logging ──────────────────────────────────────────────────────────────
@@ -42,14 +32,26 @@ function Write-Log {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO'
     )
-    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line  = "[$stamp] [$Level] $Message"
-
-    # Log writes are observational infrastructure — always execute even under -WhatIf.
-    if (-not (Test-Path $Script:LogDir)) {
-        New-Item -ItemType Directory -Path $Script:LogDir -Force -WhatIf:$false | Out-Null
+    $entryType = switch ($Level) {
+        'WARN'  { 'Warning' }
+        'ERROR' { 'Error' }
+        default { 'Information' }
     }
-    Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8 -WhatIf:$false
+    $eventId = switch ($Level) {
+        'ERROR' { 1002 }
+        'WARN'  { 1001 }
+        default { 1000 }
+    }
+
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($Script:EventSource)) {
+            [System.Diagnostics.EventLog]::CreateEventSource($Script:EventSource, 'Application')
+        }
+        Write-EventLog -LogName 'Application' -Source $Script:EventSource `
+            -EventId $eventId -EntryType $entryType -Message $Message -WhatIf:$false
+    } catch {
+        Write-Verbose "[$Level] $Message"
+    }
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -113,22 +115,15 @@ Write-LogHost ('=' * 60) -Color Cyan
 #region ── Read Metadata ─────────────────────────────────────────────────────────
 Write-LogHost 'Reading installation metadata...' -Color Cyan
 
-$activeMetaKey = $null
-if (Test-Path $Script:MetaKey) {
-    $activeMetaKey = $Script:MetaKey
-    Write-Log "Found metadata at: $Script:MetaKey"
-} elseif (Test-Path $Script:LegacyMetaKey) {
-    $activeMetaKey = $Script:LegacyMetaKey
-    Write-Log "Found legacy metadata at: $Script:LegacyMetaKey (uacbio v1.x install detected)"
-    Write-LogHost '  Legacy uacbio installation detected — performing full cleanup.' -Color Yellow
-}
-
-if ($null -eq $activeMetaKey) {
-    $msg = "No installation metadata found (checked: $($Script:MetaKey), $($Script:LegacyMetaKey)). hellosudo may not be installed."
+if (-not (Test-Path $Script:MetaKey)) {
+    $msg = "Metadata key '$($Script:MetaKey)' not found. hellosudo may not be installed."
     Write-LogHost $msg -Level ERROR -Color Red
     Write-Host 'Uninstallation aborted.' -ForegroundColor Red
     exit 1
 }
+
+$activeMetaKey = $Script:MetaKey
+Write-Log "Found metadata at: $Script:MetaKey"
 
 $meta = Get-ItemProperty -Path $activeMetaKey
 
@@ -156,46 +151,38 @@ Write-Log "OriginalSecureDesktop   : $originalSecureDesktop"
 #region ── Remove Scheduled Tasks ────────────────────────────────────────────────
 Write-LogHost 'Removing scheduled tasks...' -Color Cyan
 
-# Try current and legacy task names/paths
-$taskPairs = @(
-    @{ Path = $Script:TaskPath;       Disable = $Script:TaskDisable;       Restore = $Script:TaskRestore }
-    @{ Path = $Script:LegacyTaskPath; Disable = $Script:LegacyTaskDisable; Restore = $Script:LegacyTaskRestore }
-)
-
-foreach ($pair in $taskPairs) {
-    foreach ($taskName in @($pair.Disable, $pair.Restore)) {
-        if (Get-ScheduledTask -TaskName $taskName -TaskPath $pair.Path -ErrorAction SilentlyContinue) {
-            if ($PSCmdlet.ShouldProcess("$($pair.Path)$taskName", 'Unregister scheduled task')) {
-                Unregister-ScheduledTask -TaskName $taskName -TaskPath $pair.Path -Confirm:$false
-                Write-LogHost "  Removed task: $($pair.Path)$taskName" -Color Green
-            }
+foreach ($taskName in @($Script:TaskDisable, $Script:TaskRestore)) {
+    if (Get-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -ErrorAction SilentlyContinue) {
+        if ($PSCmdlet.ShouldProcess("$($Script:TaskPath)$taskName", 'Unregister scheduled task')) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath $Script:TaskPath -Confirm:$false
+            Write-LogHost "  Removed task: $($Script:TaskPath)$taskName" -Color Green
         }
+    } else {
+        Write-Log "  Task not found (already removed?): $($Script:TaskPath)$taskName" -Level WARN
     }
 }
 
-# Remove Task Scheduler folders (current and legacy) if empty
-foreach ($folderName in @('hellosudo', 'uacbio')) {
-    $folderPath = "\$folderName\"
-    if ($PSCmdlet.ShouldProcess($folderPath, 'Delete empty Task Scheduler folder')) {
-        try {
-            $schedService = New-Object -ComObject 'Schedule.Service'
-            $schedService.Connect()
-            $rootFolder   = $schedService.GetFolder('\')
-            $tsFolder     = $null
-            try { $tsFolder = $schedService.GetFolder($folderPath) } catch {}
+# Remove the \hellosudo\ Task Scheduler folder if it is now empty.
+if ($PSCmdlet.ShouldProcess($Script:TaskPath, 'Delete empty Task Scheduler folder')) {
+    try {
+        $schedService = New-Object -ComObject 'Schedule.Service'
+        $schedService.Connect()
+        $tsFolder = $null
+        try { $tsFolder = $schedService.GetFolder($Script:TaskPath) } catch {}
 
-            if ($null -ne $tsFolder) {
-                $remainingTasks = $tsFolder.GetTasks(0)
-                if ($remainingTasks.Count -eq 0) {
-                    $rootFolder.DeleteFolder($folderName, 0)
-                    Write-LogHost "  Task Scheduler folder '$folderPath' deleted." -Color Green
-                } else {
-                    Write-Log "Folder '$folderPath' still has $($remainingTasks.Count) task(s) — left in place." -Level WARN
-                }
+        if ($null -ne $tsFolder) {
+            $remainingTasks = $tsFolder.GetTasks(0)
+            if ($remainingTasks.Count -eq 0) {
+                $schedService.GetFolder('\').DeleteFolder('hellosudo', 0)
+                Write-LogHost "  Task Scheduler folder '$($Script:TaskPath)' deleted." -Color Green
+            } else {
+                Write-Log "Folder '$($Script:TaskPath)' still has $($remainingTasks.Count) task(s) — left in place." -Level WARN
             }
-        } catch {
-            Write-Log "Could not manage Task Scheduler folder '$folderPath': $_" -Level WARN
+        } else {
+            Write-Log "Task Scheduler folder '$($Script:TaskPath)' not found — nothing to delete."
         }
+    } catch {
+        Write-Log "Could not manage Task Scheduler folder '$($Script:TaskPath)': $_" -Level WARN
     }
 }
 #endregion
@@ -288,14 +275,12 @@ $gpupdateNeeded = $false
 if ($installedGP -contains 'Shutdown') {
     Write-LogHost "Cleaning GPO [Shutdown] section from scripts.ini ..." -Color Cyan
     Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown' -Marker '# hellosudo'
-    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown' -Marker '# uacbio'
     $gpupdateNeeded = $true
 }
 
 if ($installedGP -contains 'Startup') {
     Write-LogHost "Cleaning GPO [Startup] section from scripts.ini ..." -Color Cyan
     Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Startup' -Marker '# hellosudo'
-    Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Startup' -Marker '# uacbio'
     $gpupdateNeeded = $true
 }
 
@@ -344,8 +329,8 @@ Write-LogHost "  UAC policy reverted successfully." -Color Green
 # Always set Disabled=0 (provider enabled) on uninstall.
 # Restoring the "original" value is unreliable: any logon between install and
 # uninstall would have set Disabled=1 via the scheduled task, corrupting the
-# saved original on any subsequent reinstall. When removing uacbio the user
-# always wants the PasswordProvider active again (Disabled=0).
+# saved original on any subsequent reinstall. When uninstalling hellosudo, the
+# user always wants the PasswordProvider active again (Disabled=0).
 Write-LogHost "Re-enabling credential provider (Disabled=0)..." -Color Cyan
 
 $cpKeyPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$targetGUID"
@@ -363,44 +348,31 @@ if (Test-Path $cpKeyPath) {
 #endregion
 
 #region ── Remove Metadata Registry Key ──────────────────────────────────────────
-Write-LogHost 'Removing hellosudo metadata registry keys...' -Color Cyan
+Write-LogHost 'Removing hellosudo metadata registry key...' -Color Cyan
 
-foreach ($keyToRemove in @($Script:MetaKey, $Script:LegacyMetaKey)) {
-    if (Test-Path $keyToRemove) {
-        if ($PSCmdlet.ShouldProcess($keyToRemove, 'Remove metadata registry key')) {
-            try {
-                Remove-Item -Path $keyToRemove -Recurse -Force
-                Write-Log "Removed metadata key: $keyToRemove"
-                Write-LogHost "  Metadata key removed: $keyToRemove" -Color Green
-            } catch {
-                Write-Log "Failed to remove key ${keyToRemove}: $_" -Level WARN
-                Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $keyToRemove" -Level WARN -Color Yellow
-            }
+if (Test-Path $Script:MetaKey) {
+    if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Remove metadata registry key')) {
+        try {
+            Remove-Item -Path $Script:MetaKey -Recurse -Force
+            Write-Log "Removed metadata key: $($Script:MetaKey)"
+            Write-LogHost "  Metadata key removed." -Color Green
+        } catch {
+            Write-Log "Failed to remove metadata key: $_" -Level WARN
+            Write-LogHost "  WARNING: Could not remove metadata key. Remove manually: $($Script:MetaKey)" -Level WARN -Color Yellow
         }
     }
 }
 #endregion
 
-#region ── Remove Data Directory (if empty) ──────────────────────────────────────
-Write-LogHost 'Checking data directories for cleanup...' -Color Cyan
-Write-Log "Uninstallation complete. Checking data directories for cleanup."
-
-foreach ($dir in @($Script:DataDir, $Script:LegacyDataDir)) {
-    if (Test-Path -LiteralPath $dir) {
-        $logFile  = Join-Path $dir 'logs\uninstall.log'
-        $remaining = @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -ne $logFile })
-        if ($remaining.Count -eq 0) {
-            try {
-                Remove-Item -LiteralPath $dir -Recurse -Force
-                Write-Host "  Data directory removed: $dir" -ForegroundColor Green
-            } catch {
-                Write-Host "  WARNING: Could not remove: $dir" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "  Data directory not empty — left in place: $dir" -ForegroundColor Yellow
-        }
+#region ── Remove Event Log Source ───────────────────────────────────────────────
+try {
+    if ([System.Diagnostics.EventLog]::SourceExists($Script:EventSource)) {
+        Write-Log 'Removing Windows Event Log source registration...'
+        [System.Diagnostics.EventLog]::DeleteEventSource($Script:EventSource)
+        Write-Host "  Event log source '$($Script:EventSource)' removed." -ForegroundColor Green
     }
+} catch {
+    Write-Host "  WARNING: Could not remove event log source '$($Script:EventSource)'. Remove manually if desired." -ForegroundColor Yellow
 }
 #endregion
 
