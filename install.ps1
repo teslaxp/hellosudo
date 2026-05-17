@@ -1,4 +1,5 @@
 ﻿#Requires -Version 5.1
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Installs hellosudo — biometric-first UAC for Windows 11 local accounts.
@@ -136,53 +137,6 @@ function Write-LogHost {
 #endregion
 
 #region ── Admin Elevation ───────────────────────────────────────────────────────
-function Test-IsAdmin {
-    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Invoke-SelfElevate {
-    param([hashtable]$BoundParams = @{})
-    $scriptPath = $MyInvocation.PSCommandPath
-    # Serialize params to JSON via temp file; avoids all shell-quoting issues.
-    # SwitchParameters must be converted to plain booleans before serialization.
-    $serializable = @{}
-    $BoundParams.GetEnumerator() | ForEach-Object {
-        $serializable[$_.Key] = if ($_.Value -is [switch]) { $_.Value.IsPresent } else { $_.Value }
-    }
-    $tmpJson = [IO.Path]::GetTempFileName()
-    $serializable | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
-    $cmd     = "`$h=@{};(Get-Content -LiteralPath '$tmpJson'|ConvertFrom-Json).psobject.properties|%{`$h[`$_.Name]=`$_.Value};Remove-Item -LiteralPath '$tmpJson' -Force -EA 0;& `"$scriptPath`" @h"
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
-    $pwsh    = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-
-    # Prefer Windows 11 built-in sudo when available AND enabled in Settings.
-    # sudo.exe is present on Windows 11 24H2+ even when the feature is disabled,
-    # so we must verify the registry toggle before attempting to use it.
-    $sudoEnabled = $false
-    $sudoExe     = Get-Command sudo -CommandType Application -ErrorAction SilentlyContinue
-    if ($sudoExe) {
-        try {
-            $sudoReg     = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' `
-                               -Name 'Enabled' -ErrorAction SilentlyContinue
-            # Enabled: 0=disabled, 1=new-window, 2=input-disabled, 3=inline
-            $sudoEnabled = ($null -ne $sudoReg) -and ([int]$sudoReg.Enabled -ge 1)
-        } catch {}
-    }
-
-    if ($sudoEnabled) {
-        Write-Host 'Elevating via sudo...' -ForegroundColor Cyan
-        & sudo $pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded
-    } else {
-        Write-Host 'Elevating via Start-Process RunAs...' -ForegroundColor Cyan
-        Start-Process -FilePath $pwsh `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" `
-            -Verb RunAs
-    }
-    exit 0
-}
-
-if (-not (Test-IsAdmin)) { Invoke-SelfElevate -BoundParams $PSBoundParameters }
 #endregion
 
 #region ── Log Banner ────────────────────────────────────────────────────────────

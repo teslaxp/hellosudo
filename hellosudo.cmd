@@ -114,13 +114,16 @@ exit /b 0
 :: ─────────────────────────────────────────────────────────────────
 :require_admin
 :: Self-elevate if not already running as Administrator.
-:: %1=original subcommand, %2 onwards=full args (not used here, elevation re-runs the same cmd)
 net session >nul 2>&1
 if not errorlevel 1 exit /b 0
 echo   Requesting Administrator elevation...
-powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%~1' -Verb RunAs -Wait"
-exit /b 0
-exit /b %errorlevel%
+where sudo >nul 2>&1
+if not errorlevel 1 (
+    sudo "%~f0" %*
+) else (
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs -Wait"
+)
+exit 0
 
 :: ─────────────────────────────────────────────────────────────────
 :usage
