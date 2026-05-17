@@ -142,22 +142,19 @@ function Test-IsAdmin {
 }
 
 function Invoke-SelfElevate {
+    param([hashtable]$BoundParams = @{})
     $scriptPath = $MyInvocation.PSCommandPath
-    # Rebuild the argument list so we can forward all bound parameters
-    $argList = @()
-    foreach ($key in $PSBoundParameters.Keys) {
-        $val = $PSBoundParameters[$key]
-        if ($val -is [switch]) {
-            if ($val.IsPresent) { $argList += "-$key" }
-        } elseif ($val -is [string[]]) {
-            $argList += "-$key"
-            $argList += ($val | ForEach-Object { "'$_'" }) -join ','
-        } else {
-            $argList += "-$key '$val'"
-        }
+    # Serialize params to JSON via temp file; avoids all shell-quoting issues.
+    # SwitchParameters must be converted to plain booleans before serialization.
+    $serializable = @{}
+    $BoundParams.GetEnumerator() | ForEach-Object {
+        $serializable[$_.Key] = if ($_.Value -is [switch]) { $_.Value.IsPresent } else { $_.Value }
     }
-    $joined = $argList -join ' '
-    $pwsh   = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    $tmpJson = [IO.Path]::GetTempFileName()
+    $serializable | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
+    $cmd     = "`$h=@{};(Get-Content -LiteralPath '$tmpJson'|ConvertFrom-Json).psobject.properties|%{`$h[`$_.Name]=`$_.Value};Remove-Item -LiteralPath '$tmpJson' -Force -EA 0;& `"$scriptPath`" @h"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+    $pwsh    = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
     # Prefer Windows 11 built-in sudo when available AND enabled in Settings.
     # sudo.exe is present on Windows 11 24H2+ even when the feature is disabled,
@@ -175,17 +172,17 @@ function Invoke-SelfElevate {
 
     if ($sudoEnabled) {
         Write-Host 'Elevating via sudo...' -ForegroundColor Cyan
-        & sudo $pwsh -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $joined
+        & sudo $pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded
     } else {
         Write-Host 'Elevating via Start-Process RunAs...' -ForegroundColor Cyan
         Start-Process -FilePath $pwsh `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $joined" `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" `
             -Verb RunAs
     }
     exit 0
 }
 
-if (-not (Test-IsAdmin)) { Invoke-SelfElevate }
+if (-not (Test-IsAdmin)) { Invoke-SelfElevate -BoundParams $PSBoundParameters }
 #endregion
 
 #region ── Log Banner ────────────────────────────────────────────────────────────
@@ -302,7 +299,7 @@ if (-not $Silent) {
     Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,           ║' -ForegroundColor White
     Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ║' -ForegroundColor White
     Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
-    Write-Host '║  [C] Continue with these settings                        ║' -ForegroundColor Green
+    Write-Host '║  [Y] Continue with these settings                        ║' -ForegroundColor Green
     Write-Host '║  [T] Change Tasks selection                               ║' -ForegroundColor Yellow
     Write-Host '║  [G] Change GPO Scripts selection                         ║' -ForegroundColor Yellow
     Write-Host '║  [S] Change Sudo settings                                ║' -ForegroundColor Yellow
@@ -316,7 +313,7 @@ if (-not $Silent) {
     :menuLoop while ($true) {
         $choice = Read-Host 'Your choice'
         switch ($choice.Trim().ToUpper()) {
-            'C' { break menuLoop }
+            'Y' { break menuLoop }
             'Q' { Write-LogHost 'Installation cancelled by user.' -Color Yellow; exit 0 }
             'T' {
                 Write-Host "Available tasks: $($validTasks -join ', ')" -ForegroundColor Cyan

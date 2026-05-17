@@ -221,6 +221,10 @@ The uninstaller:
 
 > **Important**: hellosudo suppresses the PasswordProvider credential tile system-wide. This intentionally breaks any Windows UI that relies on that tile to prompt for a **different user's password**. The two most common flows affected are described below.
 
+### Multi-user machines
+
+The `Disabled` DWORD lives under `HKLM`, which is machine-wide. When hellosudo sets `Disabled=1`, it affects **all user accounts on the machine simultaneously** — not just the account that triggered the scheduled task. On shared machines, every user will experience biometric-first UAC while the value is 1, and standard UAC while it is 0. This is by design: ConsentUI reads the credential provider state from the machine hive at the time of the elevation prompt.
+
 ### "Run as different user" (File Explorer context menu)
 
 Right-clicking a program and selecting **Run as different user** invokes a CredUI dialog that uses the PasswordProvider exclusively. With it suppressed, this dialog will either show no credential options or fail silently.

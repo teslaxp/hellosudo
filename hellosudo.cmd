@@ -119,6 +119,7 @@ net session >nul 2>&1
 if not errorlevel 1 exit /b 0
 echo   Requesting Administrator elevation...
 powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%~1' -Verb RunAs -Wait"
+exit /b 0
 exit /b %errorlevel%
 
 :: ─────────────────────────────────────────────────────────────────
