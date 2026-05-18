@@ -2,84 +2,74 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Installs hellosudo — biometric-first UAC for Windows 11 local accounts.
+    Installa hellosudo — biometria primeiro no UAC para contas locais do Windows 11.
 
 .DESCRIPTION
-    Dynamically toggles the 'Disabled' DWORD of the PasswordProvider credential
-    provider GUID so that ConsentUI surfaces biometrics immediately instead of
-    hiding them behind "More choices".
+    Alterna dinamicamente o valor DWORD 'Disabled' do GUID do PasswordProvider para que 
+    a ConsentUI (janela do UAC) exiba a biometria/PIN imediatamente, em vez de escondê-la 
+    atrás do botão "Mais escolhas".
 
-    As a mandatory core step, the installer also configures the Administrator UAC
-    prompt policy to require explicit credential (or biometric) authentication on
-    the Secure Desktop by setting:
-      - ConsentPromptBehaviorAdmin = 1  (prompt for credentials, not just consent)
-      - PromptOnSecureDesktop       = 1  (always use the isolated Secure Desktop)
-    Original values are preserved in metadata and fully restored on uninstall.
+    Como etapa central obrigatória, o instalador também configura a política de prompt do UAC 
+    para Administradores para exigir autenticação explícita (biométrica ou PIN) no Secure Desktop:
+      - ConsentPromptBehaviorAdmin = 1  (solicita credenciais, não apenas consentimento)
+      - PromptOnSecureDesktop      = 1  (sempre usa o Secure Desktop isolado)
+    
+    Os valores originais são preservados em metadados no registro e restaurados no desinstalador.
 
-    Automation is achieved through Windows Task Scheduler triggers (Logon, Logoff,
-    Lock, Unlock, Startup) and optional Group Policy startup/shutdown scripts.
+.PARAMETER Quiet
+    Pula o menu interativo de "Review & Confirm". Útil para automações.
+    Alias: Silent.
 
-    Optionally enables the Windows 11 built-in sudo command.
-
-.PARAMETER Silent
-    Skip the interactive Review & Confirm menu.
-
-.PARAMETER EnableSudo
-    Enable Windows sudo during installation. Requires Windows 11 24H2 or later.
-    If sudo.exe is not found, a warning is logged and installation continues.
+.PARAMETER SkipSudo
+    Ignora a configuração do comando 'sudo' nativo do Windows.
+    Alias: NoSudo.
 
 .PARAMETER SudoMode
-    Sudo mode to configure. Valid values: normal, forceNewWindow, disableInput.
-    Only used when -EnableSudo is $true.
+    Define o modo do sudo (normal, forceNewWindow, disableInput). 
+    Só tem efeito se -SkipSudo não for utilizado. Requer Windows 11 24H2 ou superior.
 
 .PARAMETER Tasks
-    Which state-machine events to register as Scheduled Task triggers.
-    Accepts any combination of: Lock, Unlock, Logon, Logoff, Startup.
+    Define quais eventos do sistema devem disparar as tarefas agendadas.
+    Aceita: Lock, Unlock, Logon, Logoff, Startup.
 
 .PARAMETER GPScripts
-    Which Group Policy script phases to configure. Accepts: Startup, Shutdown.
-    Silently skipped on Windows Home editions that do not support local GPO.
+    Define em quais fases de Script de Diretiva de Grupo (GPO) o hellosudo deve atuar.
+    Aceita: Startup, Shutdown. Ignorado em edições Windows Home.
 
-.PARAMETER PasswordProviderGUID
-    Registry GUID of the PasswordProvider credential provider.
-    Must include surrounding braces, e.g. {60b78e88-ead8-445c-9cfd-0b87f74ea6cd}.
+.PARAMETER PasswordProviderGuid
+    O GUID do provedor de credenciais de senha. 
+    Padrão: {60b78e88-ead8-445c-9cfd-0b87f74ea6cd}.
 
-.PARAMETER IgnoreHelloCheck
-    Bypass the Windows Hello / PIN pre-flight safety check.
-    WARNING: Only use this if you are absolutely sure biometric or PIN
-    authentication is available on your system. Skipping this check on a
-    machine without Windows Hello configured will leave ConsentUI with no
-    available credential provider, effectively locking out all UAC elevations.
+.PARAMETER SkipHelloCheck
+    Ignora a verificação de segurança de PIN/Digital.
+    AVISO: Usar sem ter um PIN configurado pode causar bloqueio total do UAC (Lockout).
 
 .EXAMPLE
     .\install.ps1
-    Interactive install using all defaults (Hello check enforced).
+    Instalação interativa com configurações padrão.
 
 .EXAMPLE
-    .\install.ps1 -Silent -Tasks Lock,Unlock,Logon -GPScripts Shutdown
+    .\install.ps1 -Quiet -Tasks Lock,Unlock,Logon -GPScripts Shutdown
+    Instalação silenciosa configurando gatilhos específicos.
 
 .EXAMPLE
-    .\install.ps1 -Tasks Logon,Unlock -GPScripts @() -Silent
+    .\install.ps1 -Quiet -SkipSudo
+    Instalação silenciosa sem mexer no sudo do Windows.
 
 .EXAMPLE
-    .\install.ps1 -Silent -IgnoreHelloCheck
-    Silent install bypassing the Windows Hello pre-flight check.
-
-.EXAMPLE
-    .\install.ps1 -Silent -SudoMode forceNewWindow
-    Silent install enabling sudo in new-window mode.
-
-.EXAMPLE
-    .\install.ps1 -Silent -EnableSudo:$false
-    Silent install without configuring Windows sudo.
+    .\install.ps1 -Quiet -SkipHelloCheck
+    Instalação silenciosa ignorando o pré-check de biometria.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [switch]$Silent,
+    [alias('Silent')]
+    [switch]$Quiet,
 
-    [switch]$IgnoreHelloCheck,
+    [alias('NoHelloCheck')]
+    [switch]$SkipHelloCheck,
 
-    [switch]$EnableSudo = $true,
+    [alias('NoSudo')]
+    [switch]$SkipSudo,
 
     [ValidateSet('normal', 'forceNewWindow', 'disableInput')]
     [string]$SudoMode = 'normal',
@@ -98,16 +88,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region ── Constants ────────────────────────────────────────────────────────────
-$Script:LogDir     = 'C:\ProgramData\hellosudo\logs'
-$Script:LogFile    = Join-Path $Script:LogDir 'install.log'
-$Script:MetaKey    = 'HKLM:\SOFTWARE\hellosudo'
-$Script:CPKey       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
-$Script:UACPolicyKey= 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-$Script:TaskPath    = '\hellosudo\'
+$Script:LogDir = 'C:\ProgramData\hellosudo\logs'
+$Script:LogFile = Join-Path $Script:LogDir 'install.log'
+$Script:MetaKey = 'HKLM:\SOFTWARE\hellosudo'
+$Script:CPKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+$Script:UACPolicyKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+$Script:TaskPath = '\hellosudo\'
 $Script:TaskDisable = 'hellosudo_Disable_Password'
 $Script:TaskRestore = 'hellosudo_Restore_Password'
-$Script:RegExe      = "$env:SystemRoot\System32\reg.exe"
-$Script:GPIniPath   = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
+$Script:RegExe = "$env:SystemRoot\System32\reg.exe"
+$Script:GPIniPath = "$env:SystemRoot\System32\GroupPolicy\Machine\Scripts\scripts.ini"
+$Script:Silent = $Quiet.IsPresent -or $false -eq $PSBoundParameters['Confirm']
+$Script:EnableSudo = -not $SkipSudo.IsPresent
 #endregion
 
 #region ── Logging ──────────────────────────────────────────────────────────────
@@ -149,7 +141,7 @@ Write-Log "Tasks param   : $($Tasks -join ', ')"
 Write-Log "GPScripts     : $($GPScripts -join ', ')"
 Write-Log "ProviderGUID  : $PasswordProviderGUID"
 Write-Log "Silent        : $Silent"
-Write-Log "IgnoreHello   : $IgnoreHelloCheck"
+Write-Log "IgnoreHello   : $SkipHelloCheck"
 Write-Log "EnableSudo    : $EnableSudo"
 Write-Log "SudoMode      : $SudoMode"
 #endregion
@@ -186,7 +178,7 @@ Write-LogHost 'Running Windows Hello / NGC pre-flight check...' -Color Cyan
 $helloConfigured = Test-NgcPinConfigured
 Write-Log "NGC/Hello credentials detected: $helloConfigured"
 
-if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
+if (-not $helloConfigured -and -not $SkipHelloCheck) {
     if ($Silent) {
         # Hard terminating error — cannot prompt in silent mode
         $errMsg = @(
@@ -198,7 +190,7 @@ if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
             '  1. Configure a Windows Hello PIN or Biometrics (Settings > Accounts > Sign-in options)'
             '     then re-run the installer.'
             '  2. If you are certain a credential provider IS available and want to bypass this guard,'
-            '     re-run with: .\install.ps1 -Silent -IgnoreHelloCheck'
+            '     re-run with: .\install.ps1 -Silent -SkipHelloCheck'
         ) -join [Environment]::NewLine
         Write-Log $errMsg -Level ERROR
         throw $errMsg
@@ -231,9 +223,9 @@ if (-not $helloConfigured -and -not $IgnoreHelloCheck) {
         Write-Log 'User explicitly typed PROCEED to bypass Hello pre-flight check.'
         Write-LogHost 'Safety check bypassed by user confirmation.' -Level WARN -Color Yellow
     }
-} elseif (-not $helloConfigured -and $IgnoreHelloCheck) {
-    Write-LogHost 'WARNING: No NGC/Hello credentials detected, but -IgnoreHelloCheck was specified. Proceeding.' -Level WARN -Color Yellow
-    Write-Log 'Hello check bypassed via -IgnoreHelloCheck flag.'
+} elseif (-not $helloConfigured -and $SkipHelloCheck) {
+    Write-LogHost 'WARNING: No NGC/Hello credentials detected, but -SkipHelloCheck was specified. Proceeding.' -Level WARN -Color Yellow
+    Write-Log 'Hello check bypassed via -SkipHelloCheck flag.'
 } else {
     Write-LogHost '  Windows Hello / PIN credential confirmed — safe to proceed.' -Color Green
 }
@@ -244,21 +236,21 @@ if (-not $Silent) {
     Write-Host ''
     Write-Host '╔══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
     Write-Host '║       hellosudo  ·  Review & Confirm Installation        ║' -ForegroundColor Cyan
-    Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
+    Write-Host '╠══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host "║  Provider GUID : $PasswordProviderGUID" -ForegroundColor White
     Write-Host "║  Tasks         : $($Tasks -join ', ')" -ForegroundColor White
     Write-Host "║  GPO Scripts   : $(if ($GPScripts.Count) { $GPScripts -join ', ' } else { '(none)' })" -ForegroundColor White
     Write-Host "║  Enable Sudo   : $EnableSudo" -ForegroundColor White
     Write-Host "║  Sudo Mode     : $SudoMode" -ForegroundColor White
-    Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,           ║' -ForegroundColor White
-    Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ║' -ForegroundColor White
-    Write-Host '╠══════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
-    Write-Host '║  [Y] Continue with these settings                        ║' -ForegroundColor Green
+    Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,            ' -ForegroundColor White
+    Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ' -ForegroundColor White
+    Write-Host '╠═══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
+    Write-Host '║  [Y] Accept default settings and continue                 ║' -ForegroundColor Green
     Write-Host '║  [T] Change Tasks selection                               ║' -ForegroundColor Yellow
     Write-Host '║  [G] Change GPO Scripts selection                         ║' -ForegroundColor Yellow
-    Write-Host '║  [S] Change Sudo settings                                ║' -ForegroundColor Yellow
+    Write-Host '║  [S] Change Sudo settings                                 ║' -ForegroundColor Yellow
     Write-Host '║  [Q] Quit                                                 ║' -ForegroundColor Red
-    Write-Host '╚══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
+    Write-Host '╚═══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host ''
 
     $validTasks      = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')
@@ -309,7 +301,7 @@ if (-not $Silent) {
                 }
                 Write-Log "Sudo settings updated interactively: EnableSudo=$EnableSudo, SudoMode=$SudoMode"
             }
-            default { Write-Host 'Invalid choice, please enter C, T, G, S, or Q.' -ForegroundColor Red }
+            default { Write-Host 'Invalid choice, please enter Y, T, G, S, or Q.' -ForegroundColor Red }
         }
     }
 }

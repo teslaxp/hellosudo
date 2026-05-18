@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+chcp 65001 >nul
 
 ::  hellosudo — biometric-first UAC helper
 ::
@@ -20,6 +21,8 @@ if "%~1"==""        goto :usage
 if /i "%~1"=="on"   goto :cmd_on
 if /i "%~1"=="off"  goto :cmd_off
 if /i "%~1"=="status" goto :cmd_status
+if /i "%~1"=="--help" goto :usage
+if /i "%~1"=="-h" goto :usage
 if /i "%~1"=="help" goto :usage
 if /i "%~1"=="/?"   goto :usage
 
