@@ -156,12 +156,6 @@ sudo regedit
 sudo "net localgroup Administrators"
 ```
 
-Or use the helper:
-```cmd
-hellosudo sudo powershell
-hellosudo sudo regedit
-```
-
 **Requirements**: Windows 11 24H2 or later. If `sudo.exe` is not present, hellosudo logs a warning and continues installation without configuring sudo.
 
 ---
