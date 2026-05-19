@@ -319,42 +319,84 @@ Write-LogHost 'Reading current PasswordProvider Disabled value...' -Color Cyan
 #   $originalDisabledExisted = $true  → value was present → uninstall restores it
 $originalDisabledExisted = $false
 $originalDisabledState   = 0
+$originalConsentBehavior = 5
+$originalSecureDesktop   = 1
 
-if (Test-Path $Script:CPKey) {
+# Idempotent install behavior:
+# - If metadata already exists, reuse the originally captured values.
+# - If metadata does not exist, capture values from the live system.
+if (Test-Path $Script:MetaKey) {
+    Write-LogHost "Metadata key already exists at '$($Script:MetaKey)'. Reusing previously stored original values..." -Color Cyan
     try {
-        $cpProps = Get-ItemProperty -Path $Script:CPKey -ErrorAction SilentlyContinue
-        if ($null -ne $cpProps -and $cpProps.PSObject.Properties['Disabled']) {
-            $originalDisabledExisted = $true
-            $originalDisabledState   = [int]$cpProps.Disabled
-            Write-Log "Current 'Disabled' value: $originalDisabledState (value present)"
+        $metaProps = Get-ItemProperty -Path $Script:MetaKey -ErrorAction Stop
+
+        if ($metaProps.PSObject.Properties['OriginalDisabledExisted']) {
+            $originalDisabledExisted = [bool]([int]$metaProps.OriginalDisabledExisted)
         } else {
-            Write-Log "'Disabled' value is absent — uninstall will remove it rather than set it to 0."
+            Write-Log "Missing metadata property 'OriginalDisabledExisted'; using default '$originalDisabledExisted'." -Level WARN
+        }
+
+        if ($metaProps.PSObject.Properties['OriginalDisabledState']) {
+            $originalDisabledState = [int]$metaProps.OriginalDisabledState
+        } else {
+            Write-Log "Missing metadata property 'OriginalDisabledState'; using default '$originalDisabledState'." -Level WARN
+        }
+
+        if ($metaProps.PSObject.Properties['OriginalConsentBehavior']) {
+            $originalConsentBehavior = [int]$metaProps.OriginalConsentBehavior
+        } else {
+            Write-Log "Missing metadata property 'OriginalConsentBehavior'; using default '$originalConsentBehavior'." -Level WARN
+        }
+
+        if ($metaProps.PSObject.Properties['OriginalSecureDesktop']) {
+            $originalSecureDesktop = [int]$metaProps.OriginalSecureDesktop
+        } else {
+            Write-Log "Missing metadata property 'OriginalSecureDesktop'; using default '$originalSecureDesktop'." -Level WARN
         }
     } catch {
-        Write-Log "Could not read registry key '$($Script:CPKey)': $_" -Level WARN
+        Write-Log "Failed to read existing metadata key '$($Script:MetaKey)': $_" -Level WARN
+        Write-Log "Falling back to defaults for original state values to avoid capturing already-modified live values." -Level WARN
     }
 } else {
-    Write-LogHost "Credential Provider registry key not found: $($Script:CPKey)" -Level WARN -Color Yellow
-    Write-LogHost "The GUID may differ on this machine. Proceeding with no original value." -Level WARN -Color Yellow
+    if (Test-Path $Script:CPKey) {
+        try {
+            $cpProps = Get-ItemProperty -Path $Script:CPKey -ErrorAction SilentlyContinue
+            if ($null -ne $cpProps -and $cpProps.PSObject.Properties['Disabled']) {
+                $originalDisabledExisted = $true
+                $originalDisabledState   = [int]$cpProps.Disabled
+                Write-Log "Current 'Disabled' value: $originalDisabledState (value present)"
+            } else {
+                Write-Log "'Disabled' value is absent — uninstall will remove it rather than set it to 0."
+            }
+        } catch {
+            Write-Log "Could not read registry key '$($Script:CPKey)': $_" -Level WARN
+        }
+    } else {
+        Write-LogHost "Credential Provider registry key not found: $($Script:CPKey)" -Level WARN -Color Yellow
+        Write-LogHost "The GUID may differ on this machine. Proceeding with no original value." -Level WARN -Color Yellow
+    }
+
+    # Read current UAC policy values before modifying them
+    Write-LogHost 'Reading current UAC policy values...' -Color Cyan
+    $uacPolicy = Get-ItemProperty -Path $Script:UACPolicyKey -ErrorAction SilentlyContinue
+    $originalConsentBehavior = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['ConsentPromptBehaviorAdmin']) {
+        [int]$uacPolicy.ConsentPromptBehaviorAdmin
+    } else {
+        # Windows default: 5 (prompt for consent on secure desktop)
+        5
+    }
+    $originalSecureDesktop = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['PromptOnSecureDesktop']) {
+        [int]$uacPolicy.PromptOnSecureDesktop
+    } else {
+        # Windows default: 1 (secure desktop enabled)
+        1
+    }
 }
 
-# Read current UAC policy values before modifying them
-Write-LogHost 'Reading current UAC policy values...' -Color Cyan
-$uacPolicy = Get-ItemProperty -Path $Script:UACPolicyKey -ErrorAction SilentlyContinue
-$originalConsentBehavior = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['ConsentPromptBehaviorAdmin']) {
-    [int]$uacPolicy.ConsentPromptBehaviorAdmin
-} else {
-    # Windows default: 5 (prompt for consent on secure desktop)
-    5
-}
-$originalSecureDesktop = if ($null -ne $uacPolicy -and $uacPolicy.PSObject.Properties['PromptOnSecureDesktop']) {
-    [int]$uacPolicy.PromptOnSecureDesktop
-} else {
-    # Windows default: 1 (secure desktop enabled)
-    1
-}
-Write-Log "Current ConsentPromptBehaviorAdmin : $originalConsentBehavior"
-Write-Log "Current PromptOnSecureDesktop      : $originalSecureDesktop"
+Write-Log "OriginalDisabledExisted      : $([int]$originalDisabledExisted)"
+Write-Log "OriginalDisabledState        : $originalDisabledState"
+Write-Log "OriginalConsentBehavior      : $originalConsentBehavior"
+Write-Log "OriginalSecureDesktop        : $originalSecureDesktop"
 #endregion
 
 #region ── Write Metadata ────────────────────────────────────────────────────────
