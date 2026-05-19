@@ -351,27 +351,67 @@ if (Test-Path $Script:MetaKey) {
 }
 #endregion
 
-#region ── Remove Data Directory (if empty) ──────────────────────────────────────
-Write-LogHost 'Checking data directory for cleanup...' -Color Cyan
-Write-Log "Checking $($Script:DataDir) for cleanup."
+#region ── Remove Program Root Files + Schedule Folder Delete ───────────────────
+Write-LogHost 'Cleaning program directory root files and scheduling folder deletion on reboot...' -Color Cyan
+Write-Log "Processing program directory: $($Script:DataDir)"
 
 if (Test-Path -LiteralPath $Script:DataDir) {
-    # Keep the current log file open during cleanup — exclude it from the count.
-    $remaining = @(Get-ChildItem -LiteralPath $Script:DataDir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $Script:LogFile })
-    if ($remaining.Count -eq 0) {
-        # Log final line before the directory is removed.
-        Write-Log 'Removing data directory — all tasks complete.'
-        try {
-            Remove-Item -LiteralPath $Script:DataDir -Recurse -Force
-            Write-Host "  Data directory removed: $($Script:DataDir)" -ForegroundColor Green
-        } catch {
-            Write-Host "  WARNING: Could not remove data directory: $($Script:DataDir)" -ForegroundColor Yellow
+    # Delete only root-level files first. Subfolders are left for reboot-time folder deletion.
+    $rootFiles = @(Get-ChildItem -LiteralPath $Script:DataDir -File -ErrorAction SilentlyContinue)
+    foreach ($file in $rootFiles) {
+        if ($PSCmdlet.ShouldProcess($file.FullName, 'Remove root file from program directory')) {
+            try {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                Write-Log "Removed root file: $($file.FullName)"
+            } catch {
+                Write-Log "Could not remove root file '$($file.FullName)': $_" -Level WARN
+            }
         }
-    } else {
-        Write-Log "Data directory not empty — left in place: $($Script:DataDir)" -Level WARN
-        Write-Host "  Data directory not empty — left in place: $($Script:DataDir)" -ForegroundColor Yellow
     }
+
+    # Schedule folder deletion at reboot by writing directly to PendingFileRenameOperations
+    # (equivalent to MoveFileEx(..., MOVEFILE_DELAY_UNTIL_REBOOT), but without interop).
+    $sessionMgrKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    $pendingValueName = 'PendingFileRenameOperations'
+    $nativePath = "\??\$($Script:DataDir)"
+
+    if ($PSCmdlet.ShouldProcess($Script:DataDir, 'Schedule directory deletion on next reboot via PendingFileRenameOperations')) {
+        try {
+            $pendingRaw = (Get-ItemProperty -Path $sessionMgrKey -Name $pendingValueName -ErrorAction SilentlyContinue).$pendingValueName
+            $pending = @()
+            if ($pendingRaw -is [string]) {
+                $pending = @($pendingRaw)
+            } elseif ($pendingRaw -is [array]) {
+                $pending = @($pendingRaw)
+            }
+
+            # Delete-on-reboot entry is a pair: source path + empty destination.
+            $alreadyScheduled = $false
+            for ($i = 0; $i -lt $pending.Count; $i += 2) {
+                $src = $pending[$i]
+                $dst = if ($i + 1 -lt $pending.Count) { $pending[$i + 1] } else { $null }
+                if ($src -eq $nativePath -and [string]::IsNullOrEmpty($dst)) {
+                    $alreadyScheduled = $true
+                    break
+                }
+            }
+
+            if ($alreadyScheduled) {
+                Write-Log "Directory already scheduled for deletion on reboot: $($Script:DataDir)"
+                Write-LogHost "  Program folder already scheduled for deletion at reboot: $($Script:DataDir)" -Color Yellow
+            } else {
+                $updatedPending = @($pending + $nativePath + '')
+                Set-ItemProperty -Path $sessionMgrKey -Name $pendingValueName -Type MultiString -Value $updatedPending
+                Write-Log "Scheduled directory deletion on reboot via PendingFileRenameOperations: $($Script:DataDir)"
+                Write-LogHost "  Program folder scheduled for deletion at reboot: $($Script:DataDir)" -Color Green
+            }
+        } catch {
+            Write-Log "Failed to update PendingFileRenameOperations for '$($Script:DataDir)': $_" -Level WARN
+            Write-LogHost "  WARNING: Could not schedule folder deletion on reboot via PendingFileRenameOperations." -Level WARN -Color Yellow
+        }
+    }
+} else {
+    Write-Log "Program directory not found; nothing to clean: $($Script:DataDir)"
 }
 #endregion
 

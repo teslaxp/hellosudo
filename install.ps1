@@ -79,7 +79,7 @@ param(
     [alias('Tasks', 'tgs')]
     [string[]]$Triggers = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup'),
 
-    [ValidateSet('Startup', 'Shutdown')]
+    [ValidateSet('Startup', 'Shutdown', 'None')]
     [alias('GPScripts', 'Scripts', 'gps')]
     [string[]]$GpoScripts = @('Shutdown'),
 
@@ -95,6 +95,7 @@ $Script:LogDir = 'C:\ProgramData\hellosudo\logs'
 $Script:LogFile = Join-Path $Script:LogDir 'install.log'
 $Script:ProgramDir = 'C:\ProgramData\hellosudo'
 $Script:LauncherName = 'hellosudo.cmd'
+$Script:UninstallScriptName = 'uninstall-hellosudo.ps1'
 $Script:MetaKey = 'HKLM:\SOFTWARE\hellosudo'
 $Script:GuidStr = $PasswordProviderGuid.ToString('B')  # Format with braces for registry key paths
 $Script:CPKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
@@ -155,10 +156,13 @@ Write-Log "SudoMode      : $SudoMode"
 #region ── OS Edition Guard ─────────────────────────────────────────────────────
 $osInfo    = Get-CimInstance Win32_OperatingSystem
 $osCaption = $osInfo.Caption
-Write-Log "OS detected   : $osCaption"
+$SupportsGpo = Test-Path "$env:SystemRoot\System32\GroupPolicy"
 
-$isHomeEdition = $osCaption -match '\bHome\b'
-if ($isHomeEdition -and $GpoScripts.Count -gt 0) {
+Write-Log "OS detected   : $osCaption"
+if ($GpoScripts.Count -gt 0 -and $GpoScripts[0] -eq 'None') {
+    $GpoScripts = @()
+}
+if (-not $SupportsGpo -and $GpoScripts.Count -gt 0) {
     Write-LogHost "WARNING: OS appears to be a Home edition ('$osCaption'). Local GPO is not supported. GPO script configuration will be skipped." -Level WARN -Color Yellow
     $GpoScripts = @()
 }
@@ -260,7 +264,7 @@ if (-not $Silent) {
     Write-Host ''
 
     $validTriggers      = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')
-    $validGpoScripts  = @('Startup', 'Shutdown')
+    $validGpoScripts  = @('Startup', 'Shutdown', 'None')
 
     :menuLoop while ($true) {
         $choice = Read-Host 'Your choice'
@@ -753,9 +757,14 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
 
 $launcherSource = Join-Path $scriptRoot $Script:LauncherName
 $launcherTarget = Join-Path $Script:ProgramDir $Script:LauncherName
+$uninstallSource = Join-Path $scriptRoot $Script:UninstallScriptName
+$uninstallTarget = Join-Path $Script:ProgramDir $Script:UninstallScriptName
 
 if (-not (Test-Path -LiteralPath $launcherSource)) {
     throw "Launcher source not found: $launcherSource"
+}
+if (-not (Test-Path -LiteralPath $uninstallSource)) {
+    throw "Uninstall script source not found: $uninstallSource"
 }
 
 if ($PSCmdlet.ShouldProcess($Script:ProgramDir, 'Create program folder for hellosudo launcher')) {
@@ -768,6 +777,10 @@ if ($PSCmdlet.ShouldProcess($Script:ProgramDir, 'Create program folder for hello
 if ($PSCmdlet.ShouldProcess($launcherTarget, 'Copy hellosudo launcher')) {
     Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
     Write-Log "Launcher copied to: $launcherTarget"
+}
+if ($PSCmdlet.ShouldProcess($uninstallTarget, 'Copy uninstall script')) {
+    Copy-Item -LiteralPath $uninstallSource -Destination $uninstallTarget -Force
+    Write-Log "Uninstall script copied to: $uninstallTarget"
 }
 
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -840,6 +853,7 @@ Write-Host ('  [OK] Biometric-first UAC (ConsentPromptBehaviorAdmin=1)') -Foregr
 Write-Host ('  [OK] Secure Desktop enforced (PromptOnSecureDesktop=1)') -ForegroundColor Green
 Write-Host ("  [OK] scheduled tasks registered in \hellosudo\") -ForegroundColor Green
 Write-Host ("  [OK] launcher installed: $launcherTarget") -ForegroundColor Green
+Write-Host ("  [OK] uninstall script installed: $uninstallTarget") -ForegroundColor Green
 Write-Host ("  [OK] PATH contains: $($Script:ProgramDir)") -ForegroundColor Green
 if ($GpoScripts.Count -gt 0) {
     Write-Host ("  [OK] GPO scripts configured ($($GpoScripts -join ', '))") -ForegroundColor Green
