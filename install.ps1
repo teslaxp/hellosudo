@@ -93,6 +93,8 @@ $ErrorActionPreference = 'Stop'
 #region ── Constants ────────────────────────────────────────────────────────────
 $Script:LogDir = 'C:\ProgramData\hellosudo\logs'
 $Script:LogFile = Join-Path $Script:LogDir 'install.log'
+$Script:ProgramDir = 'C:\ProgramData\hellosudo'
+$Script:LauncherName = 'hellosudo.cmd'
 $Script:MetaKey = 'HKLM:\SOFTWARE\hellosudo'
 $Script:GuidStr = $PasswordProviderGuid.ToString('B')  # Format with braces for registry key paths
 $Script:CPKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
@@ -733,6 +735,97 @@ if ($EnableSudo) {
 }
 #endregion
 
+#region ── CLI Launcher Deployment (Program Folder + PATH) ─────────────────────
+Write-LogHost 'Installing hellosudo launcher and updating PATH...' -Color Cyan
+
+$scriptRoot = $null
+if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $scriptRoot = $PSScriptRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+    $scriptRoot = Split-Path -Path $PSCommandPath -Parent
+} elseif ($null -ne $MyInvocation.MyCommand -and -not [string]::IsNullOrWhiteSpace($MyInvocation.MyCommand.Path)) {
+    $scriptRoot = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
+}
+
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    throw 'Unable to resolve installer directory for launcher deployment (script path is unavailable).'
+}
+
+$launcherSource = Join-Path $scriptRoot $Script:LauncherName
+$launcherTarget = Join-Path $Script:ProgramDir $Script:LauncherName
+
+if (-not (Test-Path -LiteralPath $launcherSource)) {
+    throw "Launcher source not found: $launcherSource"
+}
+
+if ($PSCmdlet.ShouldProcess($Script:ProgramDir, 'Create program folder for hellosudo launcher')) {
+    if (-not (Test-Path -LiteralPath $Script:ProgramDir)) {
+        New-Item -ItemType Directory -Path $Script:ProgramDir -Force | Out-Null
+        Write-Log "Created program folder: $Script:ProgramDir"
+    }
+}
+
+if ($PSCmdlet.ShouldProcess($launcherTarget, 'Copy hellosudo launcher')) {
+    Copy-Item -LiteralPath $launcherSource -Destination $launcherTarget -Force
+    Write-Log "Launcher copied to: $launcherTarget"
+}
+
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$pathParts = @()
+if (-not [string]::IsNullOrWhiteSpace($machinePath)) {
+    $pathParts = @($machinePath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+$programDirCompare = $Script:ProgramDir.Trim().TrimEnd('\\')
+$existsInMachinePath = $false
+foreach ($part in $pathParts) {
+    if ($part.Trim().TrimEnd('\\') -ieq $programDirCompare) {
+        $existsInMachinePath = $true
+        break
+    }
+}
+
+if (-not $existsInMachinePath) {
+    $newMachinePath = if ([string]::IsNullOrWhiteSpace($machinePath)) {
+        $Script:ProgramDir
+    } else {
+        "$machinePath;$($Script:ProgramDir)"
+    }
+
+    if ($PSCmdlet.ShouldProcess('HKLM Path environment variable', "Append '$($Script:ProgramDir)'")) {
+        [Environment]::SetEnvironmentVariable('Path', $newMachinePath, 'Machine')
+        Write-Log "Added '$($Script:ProgramDir)' to machine PATH."
+    }
+} else {
+    Write-Log "Machine PATH already contains '$($Script:ProgramDir)'."
+}
+
+# Keep the current process PATH aligned so launcher works immediately in this session.
+$processPath = [Environment]::GetEnvironmentVariable('Path', 'Process')
+$processParts = @()
+if (-not [string]::IsNullOrWhiteSpace($processPath)) {
+    $processParts = @($processPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+$existsInProcessPath = $false
+foreach ($part in $processParts) {
+    if ($part.Trim().TrimEnd('\\') -ieq $programDirCompare) {
+        $existsInProcessPath = $true
+        break
+    }
+}
+
+if (-not $existsInProcessPath) {
+    $newProcessPath = if ([string]::IsNullOrWhiteSpace($processPath)) {
+        $Script:ProgramDir
+    } else {
+        "$processPath;$($Script:ProgramDir)"
+    }
+    [Environment]::SetEnvironmentVariable('Path', $newProcessPath, 'Process')
+    Write-Log "Updated current process PATH with '$($Script:ProgramDir)'."
+}
+#endregion
+
 #region ── Summary ───────────────────────────────────────────────────────────────
 $sudoStatus = if ($EnableSudo) {
     $sr = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' `
@@ -746,6 +839,8 @@ Write-Host ''
 Write-Host ('  [OK] Biometric-first UAC (ConsentPromptBehaviorAdmin=1)') -ForegroundColor Green
 Write-Host ('  [OK] Secure Desktop enforced (PromptOnSecureDesktop=1)') -ForegroundColor Green
 Write-Host ("  [OK] scheduled tasks registered in \hellosudo\") -ForegroundColor Green
+Write-Host ("  [OK] launcher installed: $launcherTarget") -ForegroundColor Green
+Write-Host ("  [OK] PATH contains: $($Script:ProgramDir)") -ForegroundColor Green
 if ($GpoScripts.Count -gt 0) {
     Write-Host ("  [OK] GPO scripts configured ($($GpoScripts -join ', '))") -ForegroundColor Green
 }

@@ -40,6 +40,15 @@ if errorlevel 1 (
     echo   [FAIL] Could not write registry. Run as Administrator.
     exit /b 1
 )
+
+:: Ensure UAC asks for admin credentials (username/password or Hello) on secure desktop.
+reg add "%UAC_KEY%" /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 1 /f >nul 2>&1
+if errorlevel 1 (
+    echo   [WARN] Could not set ConsentPromptBehaviorAdmin to 1.
+) else (
+    echo   [OK] ConsentPromptBehaviorAdmin set to 1 ^(ask for credentials on secure desktop^).
+)
+
 echo   [OK] PasswordProvider suppressed  ^(Disabled=1^)
 echo   [OK] Windows Hello / PIN will now appear first in UAC prompts.
 echo.
@@ -56,6 +65,22 @@ if errorlevel 1 (
     echo   [FAIL] Could not write registry. Run as Administrator.
     exit /b 1
 )
+
+:: Restore UAC ConsentPromptBehaviorAdmin from installer metadata when available.
+set "ORIG_CONSENT="
+for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\hellosudo" /v OriginalConsentBehavior 2^>nul') do set "ORIG_CONSENT=%%A"
+if defined ORIG_CONSENT (
+    set /a ORIG_CONSENT_DEC=!ORIG_CONSENT! >nul 2>&1
+    reg add "%UAC_KEY%" /v ConsentPromptBehaviorAdmin /t REG_DWORD /d !ORIG_CONSENT_DEC! /f >nul 2>&1
+    if errorlevel 1 (
+        echo   [WARN] Could not restore ConsentPromptBehaviorAdmin from metadata.
+    ) else (
+        echo   [OK] ConsentPromptBehaviorAdmin restored to !ORIG_CONSENT_DEC!.
+    )
+) else (
+    echo   [WARN] OriginalConsentBehavior not found in metadata; skipped UAC policy restore.
+)
+
 echo   [OK] PasswordProvider restored  ^(Disabled=0^)
 echo   [OK] Standard password+biometric UAC flow active.
 echo.
