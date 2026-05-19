@@ -2,86 +2,89 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Installa hellosudo — biometria primeiro no UAC para contas locais do Windows 11.
+    Installs hellosudo — Biometric-first UAC elevation for Windows 11 local accounts.
 
 .DESCRIPTION
-    Alterna dinamicamente o valor DWORD 'Disabled' do GUID do PasswordProvider para que 
-    a ConsentUI (janela do UAC) exiba a biometria/PIN imediatamente, em vez de escondê-la 
-    atrás do botão "Mais escolhas".
+    Dynamically toggles the 'Disabled' DWORD value of the PasswordProvider GUID so that 
+    ConsentUI (UAC window) displays biometrics/PIN immediately, instead of hiding it 
+    behind the "More choices" button.
 
-    Como etapa central obrigatória, o instalador também configura a política de prompt do UAC 
-    para Administradores para exigir autenticação explícita (biométrica ou PIN) no Secure Desktop:
-      - ConsentPromptBehaviorAdmin = 1  (solicita credenciais, não apenas consentimento)
-      - PromptOnSecureDesktop      = 1  (sempre usa o Secure Desktop isolado)
+    As a mandatory core step, the installer also configures the UAC prompt policy 
+    for Administrators to require explicit authentication (biometric or PIN) on the Secure Desktop:
+      - ConsentPromptBehaviorAdmin = 1  (prompts for credentials, not just consent)
+      - PromptOnSecureDesktop      = 1  (always uses the isolated Secure Desktop)
     
-    Os valores originais são preservados em metadados no registro e restaurados no desinstalador.
+    Original values are preserved in registry metadata and fully restored by the uninstaller.
 
 .PARAMETER Quiet
-    Pula o menu interativo de "Review & Confirm". Útil para automações.
+    Skips the interactive "Review & Confirm" menu. Ideal for automation.
     Alias: Silent.
 
 .PARAMETER SkipSudo
-    Ignora a configuração do comando 'sudo' nativo do Windows.
+    Skips the configuration of the native Windows 'sudo' command.
     Alias: NoSudo.
 
 .PARAMETER SudoMode
-    Define o modo do sudo (normal, forceNewWindow, disableInput). 
-    Só tem efeito se -SkipSudo não for utilizado. Requer Windows 11 24H2 ou superior.
+    Defines the sudo mode (normal, forceNewWindow, disableInput). 
+    Only effective if -SkipSudo is not used. Requires Windows 11 24H2 or later.
 
-.PARAMETER Tasks
-    Define quais eventos do sistema devem disparar as tarefas agendadas.
-    Aceita: Lock, Unlock, Logon, Logoff, Startup.
+.PARAMETER Triggers
+    Defines which system events should trigger the scheduled tasks.
+    Accepts: Lock, Unlock, Logon, Logoff, Startup.
 
-.PARAMETER GPScripts
-    Define em quais fases de Script de Diretiva de Grupo (GPO) o hellosudo deve atuar.
-    Aceita: Startup, Shutdown. Ignorado em edições Windows Home.
+.PARAMETER GpoScripts
+    Defines which Group Policy Object (GPO) script phases hellosudo should hook into.
+    Accepts: Startup, Shutdown. Silently ignored on Windows Home editions.
 
 .PARAMETER PasswordProviderGuid
-    O GUID do provedor de credenciais de senha. 
-    Padrão: {60b78e88-ead8-445c-9cfd-0b87f74ea6cd}.
+    The GUID of the Password Credential Provider. 
+    Default: {60b78e88-ead8-445c-9cfd-0b87f74ea6cd}.
 
 .PARAMETER SkipHelloCheck
-    Ignora a verificação de segurança de PIN/Digital.
-    AVISO: Usar sem ter um PIN configurado pode causar bloqueio total do UAC (Lockout).
+    Bypasses the Windows Hello PIN/Biometric safety check.
+    WARNING: Using this without a configured PIN may lead to total UAC lockout.
 
 .EXAMPLE
     .\install.ps1
-    Instalação interativa com configurações padrão.
+    Interactive installation with default settings.
 
 .EXAMPLE
-    .\install.ps1 -Quiet -Tasks Lock,Unlock,Logon -GPScripts Shutdown
-    Instalação silenciosa configurando gatilhos específicos.
+    .\install.ps1 -Quiet -Triggers Lock,Unlock,Logon -GpoScripts Shutdown
+    Silent installation with specific triggers.
 
 .EXAMPLE
     .\install.ps1 -Quiet -SkipSudo
-    Instalação silenciosa sem mexer no sudo do Windows.
+    Silent installation without modifying Windows sudo settings.
 
 .EXAMPLE
     .\install.ps1 -Quiet -SkipHelloCheck
-    Instalação silenciosa ignorando o pré-check de biometria.
+    Silent installation bypassing the biometric pre-flight check.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [alias('Silent')]
+    [alias('Silent', 'q')]
     [switch]$Quiet,
 
-    [alias('NoHelloCheck')]
+    [alias('NoHelloCheck','nohc')]
     [switch]$SkipHelloCheck,
 
-    [alias('NoSudo')]
+    [alias('NoSudo','nosd')]
     [switch]$SkipSudo,
 
     [ValidateSet('normal', 'forceNewWindow', 'disableInput')]
+    [alias('sm')]
     [string]$SudoMode = 'normal',
 
     [ValidateSet('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')]
-    [string[]]$Tasks = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup'),
+    [alias('Tasks', 'tgs')]
+    [string[]]$Triggers = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup'),
 
     [ValidateSet('Startup', 'Shutdown')]
-    [string[]]$GPScripts = @('Shutdown'),
+    [alias('GPScripts', 'Scripts', 'gps')]
+    [string[]]$GpoScripts = @('Shutdown'),
 
-    [ValidatePattern('^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$')]
-    [string]$PasswordProviderGUID = '{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}'
+    [alias('pwid', 'pwdguid')]
+    [guid]$PasswordProviderGuid = '{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}'
 )
 
 Set-StrictMode -Version Latest
@@ -91,7 +94,8 @@ $ErrorActionPreference = 'Stop'
 $Script:LogDir = 'C:\ProgramData\hellosudo\logs'
 $Script:LogFile = Join-Path $Script:LogDir 'install.log'
 $Script:MetaKey = 'HKLM:\SOFTWARE\hellosudo'
-$Script:CPKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+$Script:GuidStr = $PasswordProviderGuid.ToString('B')  # Format with braces for registry key paths
+$Script:CPKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
 $Script:UACPolicyKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $Script:TaskPath = '\hellosudo\'
 $Script:TaskDisable = 'hellosudo_Disable_Password'
@@ -137,9 +141,9 @@ Write-LogHost ' hellosudo  —  Biometric-First UAC Installer' -Color Cyan
 Write-LogHost ('=' * 60) -Color Cyan
 Write-Log "Script path   : $($MyInvocation.PSCommandPath)"
 Write-Log "PowerShell    : $($PSVersionTable.PSVersion)"
-Write-Log "Tasks param   : $($Tasks -join ', ')"
-Write-Log "GPScripts     : $($GPScripts -join ', ')"
-Write-Log "ProviderGUID  : $PasswordProviderGUID"
+Write-Log "Triggers param   : $($Triggers -join ', ')"
+Write-Log "GpoScripts     : $($GpoScripts -join ', ')"
+Write-Log "ProviderGUID  : $script:GuidStr"
 Write-Log "Silent        : $Silent"
 Write-Log "IgnoreHello   : $SkipHelloCheck"
 Write-Log "EnableSudo    : $EnableSudo"
@@ -152,9 +156,9 @@ $osCaption = $osInfo.Caption
 Write-Log "OS detected   : $osCaption"
 
 $isHomeEdition = $osCaption -match '\bHome\b'
-if ($isHomeEdition -and $GPScripts.Count -gt 0) {
+if ($isHomeEdition -and $GpoScripts.Count -gt 0) {
     Write-LogHost "WARNING: OS appears to be a Home edition ('$osCaption'). Local GPO is not supported. GPO script configuration will be skipped." -Level WARN -Color Yellow
-    $GPScripts = @()
+    $GpoScripts = @()
 }
 #endregion
 
@@ -237,24 +241,24 @@ if (-not $Silent) {
     Write-Host '╔══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
     Write-Host '║       hellosudo  ·  Review & Confirm Installation        ║' -ForegroundColor Cyan
     Write-Host '╠══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
-    Write-Host "║  Provider GUID : $PasswordProviderGUID" -ForegroundColor White
-    Write-Host "║  Tasks         : $($Tasks -join ', ')" -ForegroundColor White
-    Write-Host "║  GPO Scripts   : $(if ($GPScripts.Count) { $GPScripts -join ', ' } else { '(none)' })" -ForegroundColor White
+    Write-Host "║  Provider GUID : $script:GuidStr" -ForegroundColor White
+    Write-Host "║  Triggers         : $($Triggers -join ', ')" -ForegroundColor White
+    Write-Host "║  GPO Scripts   : $(if ($GpoScripts.Count) { $GpoScripts -join ', ' } else { '(none)' })" -ForegroundColor White
     Write-Host "║  Enable Sudo   : $EnableSudo" -ForegroundColor White
     Write-Host "║  Sudo Mode     : $SudoMode" -ForegroundColor White
     Write-Host '║  UAC Policy    : ConsentPromptBehaviorAdmin=1,            ' -ForegroundColor White
     Write-Host '║                  PromptOnSecureDesktop=1 (core/mandatory) ' -ForegroundColor White
     Write-Host '╠═══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
     Write-Host '║  [Y] Accept default settings and continue                 ║' -ForegroundColor Green
-    Write-Host '║  [T] Change Tasks selection                               ║' -ForegroundColor Yellow
+    Write-Host '║  [T] Change Triggers selection                               ║' -ForegroundColor Yellow
     Write-Host '║  [G] Change GPO Scripts selection                         ║' -ForegroundColor Yellow
     Write-Host '║  [S] Change Sudo settings                                 ║' -ForegroundColor Yellow
     Write-Host '║  [Q] Quit                                                 ║' -ForegroundColor Red
     Write-Host '╚═══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
     Write-Host ''
 
-    $validTasks      = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')
-    $validGPScripts  = @('Startup', 'Shutdown')
+    $validTriggers      = @('Lock', 'Unlock', 'Logon', 'Logoff', 'Startup')
+    $validGpoScripts  = @('Startup', 'Shutdown')
 
     :menuLoop while ($true) {
         $choice = Read-Host 'Your choice'
@@ -262,16 +266,16 @@ if (-not $Silent) {
             'Y' { break menuLoop }
             'Q' { Write-LogHost 'Installation cancelled by user.' -Color Yellow; exit 0 }
             'T' {
-                Write-Host "Available tasks: $($validTasks -join ', ')" -ForegroundColor Cyan
-                $raw    = Read-Host 'Enter comma-separated tasks (or press Enter to keep current)'
+                Write-Host "Available Triggers: $($validTriggers -join ', ')" -ForegroundColor Cyan
+                $raw    = Read-Host 'Enter comma-separated Triggers (or press Enter to keep current)'
                 if ($raw.Trim() -ne '') {
-                    $chosen = $raw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -in $validTasks }
+                    $chosen = $raw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -in $validTriggers }
                     if ($chosen.Count -eq 0) {
-                        Write-Host 'No valid tasks recognised, keeping current selection.' -ForegroundColor Yellow
+                        Write-Host 'No valid Triggers recognised, keeping current selection.' -ForegroundColor Yellow
                     } else {
-                        $Tasks = $chosen
-                        Write-Host "Tasks updated to: $($Tasks -join ', ')" -ForegroundColor Green
-                        Write-Log "Tasks updated interactively to: $($Tasks -join ', ')"
+                        $Triggers = $chosen
+                        Write-Host "Triggers updated to: $($Triggers -join ', ')" -ForegroundColor Green
+                        Write-Log "Triggers updated interactively to: $($Triggers -join ', ')"
                     }
                 }
             }
@@ -279,12 +283,12 @@ if (-not $Silent) {
                 if ($isHomeEdition) {
                     Write-Host 'GPO scripts are not available on this Home edition.' -ForegroundColor Yellow
                 } else {
-                    Write-Host "Available GP scripts: $($validGPScripts -join ', ')" -ForegroundColor Cyan
+                    Write-Host "Available GP scripts: $($validGpoScripts -join ', ')" -ForegroundColor Cyan
                     $raw    = Read-Host 'Enter comma-separated GPO scripts (or press Enter to keep current; leave blank to disable)'
-                    $chosen = $raw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -in $validGPScripts }
-                    $GPScripts = $chosen
-                    Write-Host "GPO Scripts updated to: $(if ($GPScripts.Count) { $GPScripts -join ', ' } else { '(none)' })" -ForegroundColor Green
-                    Write-Log "GPScripts updated interactively to: $($GPScripts -join ', ')"
+                    $chosen = $raw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -in $validGpoScripts }
+                    $GpoScripts = $chosen
+                    Write-Host "GPO Scripts updated to: $(if ($GpoScripts.Count) { $GpoScripts -join ', ' } else { '(none)' })" -ForegroundColor Green
+                    Write-Log "GpoScripts updated interactively to: $($GpoScripts -join ', ')"
                 }
             }
             'S' {
@@ -360,15 +364,15 @@ if ($PSCmdlet.ShouldProcess($Script:MetaKey, 'Create/update metadata registry ke
     if (-not (Test-Path $Script:MetaKey)) {
         New-Item -Path $Script:MetaKey -Force | Out-Null
     }
-    Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'              -Value $PasswordProviderGUID          -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'TargetGUID'              -Value $Script:GuidStr          -Type String
     Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledExisted' -Value ([int]$originalDisabledExisted) -Type DWord
     Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalDisabledState'   -Value $originalDisabledState          -Type DWord
-    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTasks'          -Value ($Tasks -join ',')             -Type String
-    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGPScripts'      -Value ($GPScripts -join ',')         -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledTriggers'          -Value ($Triggers -join ',')             -Type String
+    Set-ItemProperty -Path $Script:MetaKey -Name 'InstalledGpoScripts'      -Value ($GpoScripts -join ',')         -Type String
     Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalConsentBehavior' -Value $originalConsentBehavior       -Type DWord
     Set-ItemProperty -Path $Script:MetaKey -Name 'OriginalSecureDesktop'   -Value $originalSecureDesktop         -Type DWord
 
-    Write-Log "Metadata written: TargetGUID=$PasswordProviderGUID, OriginalDisabledExisted=$([int]$originalDisabledExisted), OriginalDisabledState=$originalDisabledState, InstalledTasks=$($Tasks -join ','), InstalledGPScripts=$($GPScripts -join ','), OriginalConsentBehavior=$originalConsentBehavior, OriginalSecureDesktop=$originalSecureDesktop"
+    Write-Log "Metadata written: TargetGUID=$Script:GuidStr, OriginalDisabledExisted=$([int]$originalDisabledExisted), OriginalDisabledState=$originalDisabledState, InstalledTriggers=$($Triggers -join ','), InstalledGpoScripts=$($GpoScripts -join ','), OriginalConsentBehavior=$originalConsentBehavior, OriginalSecureDesktop=$originalSecureDesktop"
 }
 #endregion
 
@@ -394,7 +398,7 @@ Write-LogHost '  UAC policy applied: credential prompt on Secure Desktop enabled
 function Get-RegAction {
     param([int]$Value)
     # Returns the reg.exe argument string to set Disabled to $Value
-    $keyPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+    $keyPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
     return "ADD `"$keyPath`" /v Disabled /t REG_DWORD /d $Value /f"
 }
 #endregion
@@ -403,7 +407,7 @@ function Get-RegAction {
 Write-LogHost 'Configuring scheduled tasks...' -Color Cyan
 
 # Build the raw registry key path used inside reg.exe arguments
-$Script:CPKeyRaw = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+$Script:CPKeyRaw = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
 
 # XML-escape helper — needed for embedding values inside Task XML strings.
 # Using XML avoids PSTypeName mismatches when mixing trigger types in PS5.1:
@@ -487,11 +491,11 @@ function Register-HellosudoTask {
 # ── Task: hellosudo_Disable_Password (Disabled=1) ──────────────────────────────
 $disableTriggerXml = @()
 
-if ('Logon' -in $Tasks) {
+if ('Logon' -in $Triggers) {
     Write-Log "Adding Logon trigger to $($Script:TaskDisable)"
     $disableTriggerXml += '<LogonTrigger><Enabled>true</Enabled></LogonTrigger>'
 }
-if ('Unlock' -in $Tasks) {
+if ('Unlock' -in $Triggers) {
     Write-Log "Adding Workstation Unlock trigger to $($Script:TaskDisable)"
     $disableTriggerXml += '<SessionStateChangeTrigger><StateChange>SessionUnlock</StateChange><Enabled>true</Enabled></SessionStateChangeTrigger>'
 }
@@ -508,15 +512,15 @@ if ($disableTriggerXml.Count -gt 0) {
 # ── Task: hellosudo_Restore_Password (Disabled=0) ──────────────────────────────
 $restoreTriggerXml = @()
 
-if ('Startup' -in $Tasks) {
+if ('Startup' -in $Triggers) {
     Write-Log "Adding Startup trigger to $($Script:TaskRestore)"
     $restoreTriggerXml += '<BootTrigger><Enabled>true</Enabled></BootTrigger>'
 }
-if ('Lock' -in $Tasks) {
+if ('Lock' -in $Triggers) {
     Write-Log "Adding Workstation Lock trigger to $($Script:TaskRestore)"
     $restoreTriggerXml += '<SessionStateChangeTrigger><StateChange>SessionLock</StateChange><Enabled>true</Enabled></SessionStateChangeTrigger>'
 }
-if ('Logoff' -in $Tasks) {
+if ('Logoff' -in $Triggers) {
     Write-Log "Adding Logoff (Event 7002) trigger to $($Script:TaskRestore)"
     # The subscription XML must be entity-encoded when embedded inside the outer Task XML
     $logoffSubscription = ConvertTo-XmlString (
@@ -557,7 +561,7 @@ function Update-GpoIni {
         [Parameter(Mandatory)][int]   $DisabledValue
     )
 
-    $keyPath       = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$PasswordProviderGUID"
+    $keyPath       = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$Script:GuidStr"
     $cmdLine       = $Script:RegExe
     $cmdArgs       = "ADD `"$keyPath`" /v Disabled /t REG_DWORD /d $DisabledValue /f"
     $marker        = '# hellosudo'
@@ -626,13 +630,13 @@ function Update-GpoIni {
 
 $gpupdateNeeded = $false
 
-if ('Shutdown' -in $GPScripts) {
+if ('Shutdown' -in $GpoScripts) {
     Write-LogHost 'Configuring GPO Shutdown script...' -Color Cyan
     Update-GpoIni -IniPath $Script:GPIniPath -Section 'Shutdown' -DisabledValue 0
     $gpupdateNeeded = $true
 }
 
-if ('Startup' -in $GPScripts) {
+if ('Startup' -in $GpoScripts) {
     Write-LogHost 'Configuring GPO Startup script...' -Color Cyan
     Update-GpoIni -IniPath $Script:GPIniPath -Section 'Startup' -DisabledValue 0
     $gpupdateNeeded = $true
@@ -699,9 +703,9 @@ Write-Host (' ' * 2 + 'hellosudo installed successfully.') -ForegroundColor Whit
 Write-Host ''
 Write-Host ('  [OK] Biometric-first UAC (ConsentPromptBehaviorAdmin=1)') -ForegroundColor Green
 Write-Host ('  [OK] Secure Desktop enforced (PromptOnSecureDesktop=1)') -ForegroundColor Green
-Write-Host ("  [OK] Scheduled tasks registered in \hellosudo\") -ForegroundColor Green
-if ($GPScripts.Count -gt 0) {
-    Write-Host ("  [OK] GPO scripts configured ($($GPScripts -join ', '))") -ForegroundColor Green
+Write-Host ("  [OK] scheduled tasks registered in \hellosudo\") -ForegroundColor Green
+if ($GpoScripts.Count -gt 0) {
+    Write-Host ("  [OK] GPO scripts configured ($($GpoScripts -join ', '))") -ForegroundColor Green
 }
 Write-Host ("  [OK] Windows sudo $sudoStatus") -ForegroundColor Green
 Write-Host ('  [OK] Recovery metadata saved to HKLM:\SOFTWARE\hellosudo') -ForegroundColor Green

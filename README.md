@@ -82,12 +82,13 @@ Run from an elevated PowerShell (Admin):
 
 | Parameter | Alias | Default | Description |
 | --- | --- | --- | --- |
-| `-Quiet` | `-Silent` | `$false` | Skips the interactive Review & Confirm menu. |
-| `-SkipSudo` | `-NoSudo` | `$false` | Prevents the script from enabling Windows `sudo`. |
-| `-SkipHelloCheck` | `-NoHelloCheck` | `$false` | Bypasses the safety check for existing PIN/Biometrics. |
-| `-SudoMode` | - | `normal` | Sets sudo mode: `normal`, `forceNewWindow`, `disableInput`. |
-| `-Tasks` | - | (All) | Events to trigger tasks: `Lock, Unlock, Logon, Logoff, Startup`. |
-| `-GPScripts` | - | `Shutdown` | GPO script phases: `Startup, Shutdown`. |
+| `-Quiet` | `-Silent`, `-q` | `$false` | Skips the interactive Review & Confirm menu. Ideal for automation. |
+| `-SkipSudo` | `-NoSudo`, `-nosd` | `$false` | Prevents the script from enabling and configuring Windows `sudo`. |
+| `-SkipHelloCheck` | `-NoHelloCheck`, `-nohc` | `$false` | Bypasses the Windows Hello pre-flight safety check. **WARNING: Dangerous.** |
+| `-SudoMode` | `-sm` | `normal` | Defines the native Windows sudo execution layout: `normal`, `forceNewWindow`, `disableInput`. |
+| `-Triggers` | `-Tasks`, `-tgs` | (All) | System events that cycle the tile visibility: `Lock, Unlock, Logon, Logoff, Startup`. |
+| `-GpoScripts` | `-GPScripts`, `-Scripts`, `-gps` | `Shutdown` | Local Group Policy script phases to hook into. (Ignored on Windows Home). |
+| `-PasswordProviderGuid` | `-pwdid`, `-pwdguid` | `{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}` | The system GUID of the target Credential Provider tile to manipulate. |
 
 ---
 

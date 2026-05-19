@@ -121,16 +121,16 @@ $originalDisabledExisted = if ($meta.PSObject.Properties['OriginalDisabledExiste
 } else {
     $originalDisabledState -ne 0
 }
-$installedTasks          = if ($meta.InstalledTasks)     { $meta.InstalledTasks   -split ',' | Where-Object { $_ } } else { @() }
-$installedGP             = if ($meta.InstalledGPScripts) { $meta.InstalledGPScripts -split ',' | Where-Object { $_ } } else { @() }
+$InstalledTriggers          = if ($meta.InstalledTriggers)     { $meta.InstalledTriggers   -split ',' | Where-Object { $_ } } else { @() }
+$InstalledGpo             = if ($meta.InstalledGpoScripts) { $meta.InstalledGpoScripts -split ',' | Where-Object { $_ } } else { @() }
 $originalConsentBehavior = if ($meta.PSObject.Properties['OriginalConsentBehavior']) { [int]$meta.OriginalConsentBehavior } else { 5 }
 $originalSecureDesktop   = if ($meta.PSObject.Properties['OriginalSecureDesktop'])   { [int]$meta.OriginalSecureDesktop }   else { 1 }
 
 Write-Log "TargetGUID              : $targetGUID"
 Write-Log "OriginalDisabledExisted : $originalDisabledExisted"
 Write-Log "OriginalDisabledState   : $originalDisabledState"
-Write-Log "InstalledTasks          : $($installedTasks -join ', ')"
-Write-Log "InstalledGPScripts      : $($installedGP -join ', ')"
+Write-Log "InstalledTriggers          : $($InstalledTriggers -join ', ')"
+Write-Log "InstalledGpoScripts      : $($InstalledGpo -join ', ')"
 Write-Log "OriginalConsentBehavior : $originalConsentBehavior"
 Write-Log "OriginalSecureDesktop   : $originalSecureDesktop"
 #endregion
@@ -259,13 +259,13 @@ function Remove-HellosudoGpoBlock {
 
 $gpupdateNeeded = $false
 
-if ($installedGP -contains 'Shutdown') {
+if ($InstalledGpo -contains 'Shutdown') {
     Write-LogHost "Cleaning GPO [Shutdown] section from scripts.ini ..." -Color Cyan
     Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Shutdown' -Marker '# hellosudo'
     $gpupdateNeeded = $true
 }
 
-if ($installedGP -contains 'Startup') {
+if ($InstalledGpo -contains 'Startup') {
     Write-LogHost "Cleaning GPO [Startup] section from scripts.ini ..." -Color Cyan
     Remove-HellosudoGpoBlock -IniPath $Script:GPIniPath -Section 'Startup' -Marker '# hellosudo'
     $gpupdateNeeded = $true
