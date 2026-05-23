@@ -73,7 +73,7 @@ Run from an elevated PowerShell (Admin):
 * **Windows Sudo Integration:** Automatically enables and configures the 24H2 `sudo` command.
 * **Smart State Machine:** Precise control via Task Scheduler (Logon, Lock, Unlock, etc.).
 * **GPO Coverage:** Optional Startup/Shutdown script support for Pro/Enterprise editions.
-* **Safety First:** Pre-flight check prevents UAC lockout if no PIN is configured.
+* **Safety First:** Pre-flight check prevents system lockout if no PIN/biometric is configured.
 * **Full Reversibility:** Metadata backup allows `uninstall.ps1` to restore 100% of original settings.
 
 ---
@@ -84,7 +84,7 @@ Run from an elevated PowerShell (Admin):
 | --- | --- | --- | --- |
 | `-Quiet` | `-Silent`, `-q` | `$false` | Skips the interactive Review & Confirm menu. Ideal for automation. |
 | `-SkipSudo` | `-NoSudo`, `-nosd` | `$false` | Prevents the script from enabling and configuring Windows `sudo`. |
-| `-SkipHelloCheck` | `-NoHelloCheck`, `-nohc` | `$false` | Bypasses the Windows Hello pre-flight safety check. **WARNING: Dangerous.** |
+| `-SkipHelloCheck` | `-NoHelloCheck`, `-nohc` | `$false` | Bypasses the Windows Hello pre-flight safety check. **WARNING: Extremely dangerous.** If no working PIN or biometric is available and this flag is used, you may be unable to log into Windows at all. |
 | `-SudoMode` | `-sm` | `normal` | Defines the native Windows sudo execution layout: `normal`, `forceNewWindow`, `disableInput`. |
 | `-Triggers` | `-Tasks`, `-tgs` | (All) | System events that cycle the tile visibility: `Lock, Unlock, Logon, Logoff, Startup`. |
 | `-GpoScripts` | `-GPScripts`, `-Scripts`, `-gps` | `Shutdown` | Local Group Policy script phases to hook into. (Ignored on Windows Home). |
@@ -96,7 +96,10 @@ Run from an elevated PowerShell (Admin):
 
 ### Pre-flight Check
 
-If no Windows Hello PIN/Biometric is detected, the installer will **abort** in silent mode or require a `PROCEED` confirmation in interactive mode. This prevents you from disabling the password provider and being locked out of UAC prompts.
+If no Windows Hello PIN/Biometric is detected, the installer will **abort** in silent mode or require a `PROCEED` confirmation in interactive mode. This prevents you from disabling the password provider and being locked out of Windows entirely.
+
+> [!CAUTION]
+> **The PasswordProvider controls authentication at the Windows login screen, not only UAC.** If hellosudo's Task Scheduler jobs fail to restore `Disabled = 0` before a login is required — for example, after an unexpected power loss, a Windows Update that disables scheduled tasks, or a scheduler failure — **you will be unable to log into Windows** even with a correct password, unless Windows Hello is working flawlessly at that moment. Ensure you have a recovery strategy before installing (e.g., a Windows Recovery Environment (RE) USB drive or a second local administrator account).
 
 ### Metadata Backup
 
@@ -111,12 +114,16 @@ Original values are stored in `HKLM:\SOFTWARE\hellosudo` before any changes. Thi
 
 ## Known Limitations
 
+> [!CAUTION]
+> **Risk of total system lockout.** hellosudo suppresses the PasswordProvider system-wide. This provider controls authentication at **all** Windows credential prompts — including the login screen and lock screen, not just UAC. If the Task Scheduler jobs fail to restore `Disabled = 0` before a login is required (power loss, Windows Update interference, scheduler failure), **you will be locked out of Windows entirely** — not just unable to elevate privileges. Always ensure Windows Hello (PIN or biometric) is working correctly, and keep a recovery option available (bootable USB, Windows RE, or a second admin account).
+
 > [!IMPORTANT]
-> hellosudo suppresses the PasswordProvider system-wide. This intentionally affects specific Windows flows:
+> The following specific Windows flows are intentionally affected while hellosudo is active:
 
 1. **"Run as different user":** Right-clicking and selecting this will show no password field. Use `runas /user:Account "app.exe"` instead.
 2. **Network Map Drive:** Entering alternative credentials via GUI might fail. Use `net use` via CLI.
 3. **Multi-user machines:** The setting is machine-wide. All users will see the biometric-first prompt.
+4. **Task Scheduler dependency:** The safe cycling of the PasswordProvider state depends entirely on scheduled tasks running reliably. Disabling, deleting, or corrupting these tasks without running `uninstall.ps1` first may leave the system in an unsafe state.
 
 ---
 
